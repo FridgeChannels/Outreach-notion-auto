@@ -1,0 +1,15 @@
+2026/07/23-20:28:26.204 d8a5da5 Reusing MANIFEST /Users/markbai/Documents/notion-auto/profiles/outreach-worker/Default/IndexedDB/https_app.notion.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/07/23-20:28:26.205 d8a5da5 Recovering log #297
+2026/07/23-20:28:26.205 d8a5da5 Reusing old log /Users/markbai/Documents/notion-auto/profiles/outreach-worker/Default/IndexedDB/https_app.notion.com_0.indexeddb.leveldb/000297.log 
+2026/07/23-20:28:26.205 d8a5da5 Delete type=2 #295
+2026/07/23-20:28:27.638 d8a5da5 Level-0 table #302: started
+2026/07/23-20:28:27.640 d8a5da5 Level-0 table #302: 6398 bytes OK
+2026/07/23-20:28:27.680 d8a5da5 Delete type=0 #297
+2026/07/23-20:28:27.683 d8a5dee Manual compaction at level-0 from '\x00h\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00i\x00\x00\x00' @ 0 : 0; will stop at '\x00h\x00\x00\x05' @ 8938 : 1
+2026/07/23-20:28:27.684 d8a5dee Compacting 1@0 + 1@1 files
+2026/07/23-20:28:27.688 d8a5dee Generated table #303@0: 1222 keys, 17032 bytes
+2026/07/23-20:28:27.688 d8a5dee Compacted 1@0 + 1@1 files => 17032 bytes
+2026/07/23-20:28:27.690 d8a5dee compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/07/23-20:28:27.691 d8a5dee Delete type=2 #302
+2026/07/23-20:28:27.691 d8a5da5 Manual compaction at level-0 from '\x00h\x00\x00\x05' @ 8938 : 1 .. '\x00i\x00\x00\x00' @ 0 : 0; will stop at (end)
+2026/07/23-20:28:28.945 d8a5da7 Manual compaction at level-0 from '\x00i\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00j\x00\x00\x00' @ 0 : 0; will stop at (end)

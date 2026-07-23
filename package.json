@@ -1,0 +1,29 @@
+{
+  "name": "outreach-notion-auto",
+  "version": "1.0.0",
+  "description": "FC2.0 Follow-up Playwright workers: Outreach Session + Mailbox Scan",
+  "type": "module",
+  "scripts": {
+    "worker": "tsx src/cli.ts",
+    "worker:once": "tsx src/cli.ts --once",
+    "worker:outreach": "tsx src/cli.ts --once --queue=outreach",
+    "worker:mailbox": "tsx src/cli.ts --once --queue=mailbox",
+    "worker:login": "tsx scripts/login.ts",
+    "worker:diagnose": "tsx scripts/diagnose.ts",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f outreach-worker",
+    "test": "tsx --test 'tests/**/*.test.ts'"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@notionhq/client": "^5.13.0",
+    "dotenv": "^17.2.4",
+    "playwright": "^1.49.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,26 @@
+services:
+  outreach-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: outreach-notion-auto:latest
+    container_name: outreach-notion-auto
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Override host-specific paths from .env for in-container layout
+      NOTION_PROFILE_DIR: /app/profiles/outreach-worker
+      ARTIFACT_DIR: artifacts
+      PLAYWRIGHT_HEADLESS: "true"
+      WORKER_ID: ${WORKER_ID:-worker-docker-1}
+      TZ: Asia/Shanghai
+    volumes:
+      # Persist Notion login session (login once on host, then mount)
+      - ./profiles:/app/profiles
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./log:/app/log
+    # Chromium needs shared memory; default 64MB is often too small
+    shm_size: "2gb"
+    init: true

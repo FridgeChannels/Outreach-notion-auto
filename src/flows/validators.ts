@@ -1,0 +1,136 @@
+import { MAX_TECHNICAL_RETRIES, SESSION_STATUS, type SessionStatus } from "../config.js";
+import { SkipError, type ExecutionPhase } from "../errors.js";
+import type { SessionRecord } from "../notion/sessionRepository.js";
+import type { MailboxRecord } from "../notion/mailboxRepository.js";
+import { MAILBOX_STATUS } from "../config.js";
+
+export function validateSessionBeforeBrowser(session: SessionRecord): void {
+  if (!session.sessionId?.trim()) throw new SkipError("Session ID is empty");
+  if (!session.clientPageId || !session.clientPageUrl) {
+    throw new SkipError("Client relation is empty");
+  }
+  if (session.status !== SESSION_STATUS.CLAIMED) {
+    throw new SkipError(`Status is ${session.status}, expected Claimed`);
+  }
+  if (session.clientDnc) throw new SkipError("Client Email Do Not Contact is true");
+}
+
+export function validateSessionBeforeSubmit(
+  session: SessionRecord,
+  expectedClientPageId: string | null,
+): void {
+  if (session.status !== SESSION_STATUS.CLAIMED) {
+    throw new SkipError(`Status changed to ${session.status} before submit`);
+  }
+  if (session.clientPageId !== expectedClientPageId) {
+    throw new SkipError("Client relation changed before submit");
+  }
+  if (session.clientDnc) throw new SkipError("DNC enabled before submit");
+}
+
+export function validateMailboxBeforeBrowser(mailbox: MailboxRecord): void {
+  if (
+    mailbox.status === MAILBOX_STATUS.PAUSED ||
+    mailbox.status === MAILBOX_STATUS.DISABLED
+  ) {
+    throw new SkipError(`Mailbox is ${mailbox.status}`);
+  }
+}
+
+export function isSchedulerEligible(
+  status: string | null,
+  nextAction: string | null,
+  nextWakeAt: string | null,
+  now = new Date(),
+): boolean {
+  if (!status || !nextWakeAt) return false;
+  if (status !== SESSION_STATUS.PENDING && status !== SESSION_STATUS.SLEEPING) return false;
+  if (!nextAction || nextAction === "None" || nextAction === "Human Review") return false;
+  return new Date(nextWakeAt).getTime() <= now.getTime();
+}
+
+export type ErrorAction = "skip" | "technical-retry" | "mark-error";
+
+export function decideErrorAction(
+  phase: ExecutionPhase,
+  retryCount: number,
+  submitted: boolean,
+): ErrorAction {
+  if (phase === "skip") return "skip";
+  if (phase === "before-submit" && retryCount < MAX_TECHNICAL_RETRIES && !submitted) {
+    return "technical-retry";
+  }
+  return "mark-error";
+}
+
+/** Reject prompt-page / new-chat stub URLs as Conversation URL. */
+export function knownPromptUrls(urls: string[]): string[] {
+  return urls.map((u) => u.trim()).filter(Boolean);
+}
+
+export function isRealConversationUrl(url: string, knownPromptUrlsList: string[] = []): boolean {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    if (host !== "www.notion.so" && host !== "notion.so" && host !== "app.notion.com") {
+      return false;
+    }
+    // Network capture previously saved API endpoints as Conversation URL
+    if (u.pathname.includes("/api/") || u.pathname.startsWith("/api")) return false;
+    if (u.pathname.includes("/_assets/")) return false;
+    if (u.searchParams.get("t") === "new") return false;
+    if (/\/new(?:\/|$)/i.test(u.pathname)) return false;
+
+    for (const prompt of knownPromptUrlsList) {
+      try {
+        const p = new URL(prompt);
+        if (u.origin === p.origin && u.pathname === p.pathname) return false;
+        // Compact id in prompt path should also match dashed page forms
+        const promptId = p.pathname.match(/([0-9a-f]{32})/i)?.[1]?.toLowerCase();
+        const urlId =
+          u.pathname.match(/([0-9a-f]{32})/i)?.[1]?.toLowerCase() ??
+          u.pathname
+            .match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1]
+            ?.replace(/-/g, "")
+            .toLowerCase();
+        if (promptId && urlId && promptId === urlId) return false;
+      } catch {
+        // ignore
+      }
+    }
+
+    // Only durable chat/thread URLs — never arbitrary pages or API responses
+    return (
+      /\/chat\//i.test(u.pathname) ||
+      u.searchParams.has("threadId") ||
+      u.searchParams.has("chatId") ||
+      u.searchParams.has("agentChatId")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Alias used by conversation wait/verify helpers. */
+export const isValidConversationUrl = isRealConversationUrl;
+
+export function assertChatTemplate(
+  message: string,
+  promptUrl: string,
+  targetUrl: string,
+  promptLabel: string,
+  targetLabel: string,
+): boolean {
+  const lines = message.split("\n");
+  return (
+    lines[0] === `请运行以下 Prompt：` &&
+    lines[1] === promptUrl &&
+    lines[2] === "" &&
+    lines[3] === targetLabel &&
+    lines[4] === targetUrl &&
+    lines.length === 5 &&
+    promptLabel.length >= 0
+  );
+}
+
+export type { SessionStatus };
