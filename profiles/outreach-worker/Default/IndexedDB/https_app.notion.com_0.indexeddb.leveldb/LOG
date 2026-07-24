@@ -1,25 +1,24 @@
-2026/07/23-20:31:09.105 d8a7578 Reusing MANIFEST /Users/markbai/Documents/notion-auto/profiles/outreach-worker/Default/IndexedDB/https_app.notion.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/07/23-20:31:09.106 d8a7578 Recovering log #301
-2026/07/23-20:31:09.107 d8a7578 Reusing old log /Users/markbai/Documents/notion-auto/profiles/outreach-worker/Default/IndexedDB/https_app.notion.com_0.indexeddb.leveldb/000301.log 
-2026/07/23-20:31:09.108 d8a7578 Delete type=2 #299
-2026/07/23-20:31:10.126 d8a7587 Level-0 table #306: started
-2026/07/23-20:31:10.144 d8a7587 Level-0 table #306: 6442 bytes OK
-2026/07/23-20:31:10.151 d8a7587 Delete type=0 #301
-2026/07/23-20:31:10.152 d8a7575 Manual compaction at level-0 from '\x00j\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00k\x00\x00\x00' @ 0 : 0; will stop at '\x00j\x00\x00\x05' @ 9155 : 1
-2026/07/23-20:31:10.152 d8a7575 Compacting 1@0 + 1@1 files
-2026/07/23-20:31:10.159 d8a7575 Generated table #307@0: 1230 keys, 17221 bytes
-2026/07/23-20:31:10.159 d8a7575 Compacted 1@0 + 1@1 files => 17221 bytes
-2026/07/23-20:31:10.165 d8a7575 compacted to: files[ 0 1 1 0 0 0 0 ]
-2026/07/23-20:31:10.166 d8a7575 Delete type=2 #306
-2026/07/23-20:31:10.168 d8a7588 Manual compaction at level-0 from '\x00j\x00\x00\x05' @ 9155 : 1 .. '\x00k\x00\x00\x00' @ 0 : 0; will stop at (end)
-2026/07/23-20:31:12.389 d8a7575 Level-0 table #309: started
-2026/07/23-20:31:12.391 d8a7575 Level-0 table #309: 959 bytes OK
-2026/07/23-20:31:12.398 d8a7575 Delete type=2 #303
-2026/07/23-20:31:12.398 d8a7575 Delete type=0 #305
-2026/07/23-20:31:12.398 d8a7575 Manual compaction at level-0 from '\x00k\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00l\x00\x00\x00' @ 0 : 0; will stop at '\x00k\x00\x00\x05' @ 9185 : 1
-2026/07/23-20:31:12.398 d8a7575 Compacting 1@0 + 1@1 files
-2026/07/23-20:31:12.404 d8a7575 Generated table #310@0: 1230 keys, 17217 bytes
-2026/07/23-20:31:12.404 d8a7575 Compacted 1@0 + 1@1 files => 17217 bytes
-2026/07/23-20:31:12.407 d8a7575 compacted to: files[ 0 1 1 0 0 0 0 ]
-2026/07/23-20:31:12.408 d8a7575 Delete type=2 #309
-2026/07/23-20:31:12.408 d8a7575 Manual compaction at level-0 from '\x00k\x00\x00\x05' @ 9185 : 1 .. '\x00l\x00\x00\x00' @ 0 : 0; will stop at (end)
+2026/07/23-23:53:22.044 12e Reusing MANIFEST /app/profiles/outreach-worker/Default/IndexedDB/https_app.notion.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/07/23-23:53:22.046 12e Recovering log #317
+2026/07/23-23:53:22.046 12e Reusing old log /app/profiles/outreach-worker/Default/IndexedDB/https_app.notion.com_0.indexeddb.leveldb/000317.log 
+2026/07/23-23:53:22.762 12f Level-0 table #321: started
+2026/07/23-23:53:22.764 12f Level-0 table #321: 2695 bytes OK
+2026/07/23-23:53:22.767 12f Delete type=0 #317
+2026/07/23-23:53:22.770 12a Manual compaction at level-0 from '\x00p\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00q\x00\x00\x00' @ 0 : 0; will stop at '\x00p\x00\x00\x05' @ 9946 : 1
+2026/07/23-23:53:22.770 12a Compacting 1@0 + 1@1 files
+2026/07/23-23:53:22.773 12a Generated table #322@0: 179 keys, 2978 bytes
+2026/07/23-23:53:22.773 12a Compacted 1@0 + 1@1 files => 2978 bytes
+2026/07/23-23:53:22.773 12a compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/07/23-23:53:22.774 12a Delete type=2 #321
+2026/07/23-23:53:22.774 12a Manual compaction at level-0 from '\x00p\x00\x00\x05' @ 9946 : 1 .. '\x00q\x00\x00\x00' @ 0 : 0; will stop at (end)
+2026/07/23-23:53:25.017 12e Level-0 table #324: started
+2026/07/23-23:53:25.022 12e Level-0 table #324: 558 bytes OK
+2026/07/23-23:53:25.023 12e Delete type=0 #320
+2026/07/23-23:53:25.023 12e Delete type=2 #318
+2026/07/23-23:53:25.025 12e Manual compaction at level-0 from '\x00q\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00r\x00\x00\x00' @ 0 : 0; will stop at '\x00q\x00\x00\x05' @ 9976 : 1
+2026/07/23-23:53:25.025 12e Compacting 1@0 + 1@1 files
+2026/07/23-23:53:25.033 12e Generated table #325@0: 183 keys, 2998 bytes
+2026/07/23-23:53:25.034 12e Compacted 1@0 + 1@1 files => 2998 bytes
+2026/07/23-23:53:25.034 12e compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/07/23-23:53:25.035 12e Delete type=2 #324
+2026/07/23-23:53:25.035 12f Manual compaction at level-0 from '\x00q\x00\x00\x05' @ 9976 : 1 .. '\x00r\x00\x00\x00' @ 0 : 0; will stop at (end)

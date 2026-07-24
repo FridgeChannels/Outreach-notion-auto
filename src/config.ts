@@ -20,6 +20,9 @@ export const CHAT_RUN_TIMEOUT_MS = 10 * 60 * 1000;
 export const SESSION_WRITEBACK_TIMEOUT_MS =
   Number(process.env.SESSION_WRITEBACK_TIMEOUT_MS) || 3 * 60 * 1000;
 export const UI_ACTION_TIMEOUT_MS = 30 * 1000;
+/** Wait for Notion AI corner / panel (servers are often slower than local). */
+export const AI_PANEL_TIMEOUT_MS =
+  Number(process.env.AI_PANEL_TIMEOUT_MS) || 60 * 1000;
 export const MAX_TECHNICAL_RETRIES = 2;
 export const LOCK_TTL_MS = Number(process.env.LOCK_TTL_MS) || 15 * 60 * 1000;
 export const LOCK_HEARTBEAT_INTERVAL_MS = 60 * 1000;

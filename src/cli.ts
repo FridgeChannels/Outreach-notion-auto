@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { SESSION_POLL_INTERVAL_MS, validateEnv, WORKER_ID } from "./config.js";
+import { preflightBrowserEnvironment } from "./browser.js";
 import { pollOnce } from "./flows/poll.js";
 import { clearLocksOwnedByThisWorker } from "./locks.js";
 import { logger } from "./logging.js";
@@ -49,6 +50,13 @@ async function main(): Promise<void> {
 
   const cleared = await clearLocksOwnedByThisWorker();
   if (cleared) logger.info(`Cleared ${cleared} stale lock(s) from prior ${WORKER_ID} run`);
+
+  try {
+    await preflightBrowserEnvironment();
+  } catch (e) {
+    logger.error("Browser preflight failed — fix disk/temp/profile before running", e);
+    process.exit(1);
+  }
 
   if (args.includes("--once")) {
     logger.info(`Worker ${WORKER_ID} once`, { queues });

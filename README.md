@@ -31,7 +31,36 @@ cp .env.example .env
 npm run worker:login
 ```
 
-在浏览器完成 Notion 登录后，回到终端按 Enter。登录态写入 `NOTION_PROFILE_DIR`。
+在浏览器完成 Notion 登录后，回到终端按 Enter。登录态写入 `NOTION_PROFILE_DIR`（默认 `./profiles/outreach-worker`）。
+
+### 传到 Linux 服务器（无图形界面）
+
+**不要把 `profiles/` 提交到 GitHub。** 目录里是完整 Notion 会话 Cookie/Token，进仓库等于公开账号。代码走 Git；登录态用 `scp`/`rsync` 单独拷。
+
+本机（已登录）：
+
+```bash
+# 先停掉本地 worker，避免 profile 被锁
+tar czf /tmp/outreach-profile.tgz -C profiles outreach-worker
+scp /tmp/outreach-profile.tgz user@your-server:/tmp/
+rm /tmp/outreach-profile.tgz
+```
+
+服务器：
+
+```bash
+cd /path/to/Outreach-notion-auto
+mkdir -p profiles
+tar xzf /tmp/outreach-profile.tgz -C profiles
+# 清掉跨机拷贝残留的 Chromium 锁
+rm -f profiles/outreach-worker/SingletonLock \
+      profiles/outreach-worker/SingletonCookie \
+      profiles/outreach-worker/SingletonSocket
+# .env 里：NOTION_PROFILE_DIR=./profiles/outreach-worker
+# Docker：compose 已挂载 ./profiles → /app/profiles
+```
+
+之后过期再在本机 `npm run worker:login`，重新打包上传覆盖即可。Mac → Linux 的 Playwright Chromium profile 一般可直接用。
 
 ## 运行
 
@@ -107,7 +136,7 @@ AND Next Scan At <= now
 
 ## 关键修复（相对旧版）
 
-1. **Conversation URL**：拒绝保存 Prompt 页或 `?t=new` 桩 URL；新建 Chat 后等待真实 Chat 路由再写回。
+1. **Conversation URL**：拒绝 `?t=new` 与裸 Prompt 页；接受 Notion Agent 的 `app.notion.com/p/…?t=<threadId>`（或 `/chat/` 等路由）并写回。
 2. **多行输入**：`Shift+Enter` 换行，避免 Notion AI 把 `\n` 当发送。
 3. **Next Action 过滤**：调度排除 `None` / `Human Review`。
 4. **完成校验**：要求 `Last Control JSON` 已更新；Sleeping/Pending/Closed 等按文档校验。

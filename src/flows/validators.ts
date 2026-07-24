@@ -68,6 +68,18 @@ export function knownPromptUrls(urls: string[]): string[] {
   return urls.map((u) => u.trim()).filter(Boolean);
 }
 
+/**
+ * Notion Agent durable thread id in `?t=…` (not `t=new`).
+ * Observed form: 32-char hex on app.notion.com/p/{Prompt}?t={thread}.
+ */
+export function isDurableAgentThreadParam(t: string | null | undefined): boolean {
+  if (!t) return false;
+  const v = t.trim();
+  if (!v || v.toLowerCase() === "new") return false;
+  if (/^[0-9a-f]{20,}$/i.test(v)) return true;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+}
+
 export function isRealConversationUrl(url: string, knownPromptUrlsList: string[] = []): boolean {
   try {
     const u = new URL(url);
@@ -80,6 +92,11 @@ export function isRealConversationUrl(url: string, knownPromptUrlsList: string[]
     if (u.pathname.includes("/_assets/")) return false;
     if (u.searchParams.get("t") === "new") return false;
     if (/\/new(?:\/|$)/i.test(u.pathname)) return false;
+
+    // Current Notion Agent UI: conversation stays on the Prompt /p/ page with ?t=<threadId>
+    if (isDurableAgentThreadParam(u.searchParams.get("t"))) {
+      return true;
+    }
 
     for (const prompt of knownPromptUrlsList) {
       try {
@@ -99,7 +116,7 @@ export function isRealConversationUrl(url: string, knownPromptUrlsList: string[]
       }
     }
 
-    // Only durable chat/thread URLs — never arbitrary pages or API responses
+    // Legacy / alternate durable chat routes
     return (
       /\/chat\//i.test(u.pathname) ||
       u.searchParams.has("threadId") ||

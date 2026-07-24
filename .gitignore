@@ -6,3 +6,4 @@ dist/
 data/session-locks/
 data/mailbox-locks/
 artifacts/
+.playwright/

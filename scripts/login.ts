@@ -1,19 +1,23 @@
 import "dotenv/config";
-import { mkdir } from "node:fs/promises";
-import { chromium } from "playwright";
+import { configurePlaywrightTempDir, openPersistentBrowserContext, preflightBrowserEnvironment } from "../src/browser.js";
+import { NOTION_PROFILE_DIR } from "../src/config.js";
 
 async function main(): Promise<void> {
-  const dir = process.env.NOTION_PROFILE_DIR?.trim() || "./profiles/outreach-worker";
-  await mkdir(dir, { recursive: true });
+  await preflightBrowserEnvironment();
+  await configurePlaywrightTempDir();
+
+  const dir = NOTION_PROFILE_DIR || "./profiles/outreach-worker";
   console.log(`Opening browser; profile dir: ${dir}`);
+  console.log(`Playwright TMPDIR: ${process.env.TMPDIR}`);
   console.log("Log in to Notion, then press Enter in this terminal to save and exit.\n");
 
-  const context = await chromium.launchPersistentContext(dir, {
-    headless: false,
-    viewport: { width: 1440, height: 1000 },
-    locale: "zh-CN",
-    timezoneId: "Asia/Shanghai",
-  });
+  // Prefer shared launcher (temp dir + retries + stale lock clear).
+  // Login is interactive → force headed via env if needed.
+  if (process.env.PLAYWRIGHT_HEADLESS === "true") {
+    console.warn("PLAYWRIGHT_HEADLESS=true — set false for interactive login.");
+  }
+
+  const context = await openPersistentBrowserContext();
   const page = await context.newPage();
   await page.goto("https://www.notion.so", { waitUntil: "domcontentloaded", timeout: 90_000 });
 

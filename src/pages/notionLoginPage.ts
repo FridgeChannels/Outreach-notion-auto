@@ -22,6 +22,13 @@ export class NotionLoginPage {
     if ((await loginButton.isVisible().catch(() => false)) && /notion\.(so|com)/.test(url)) {
       throw new AuthenticationError("Notion login required");
     }
+    // Blank about:blank before first goto — skip body checks
+    if (!url || url === "about:blank") return;
+
+    const body = await page.locator("body").innerText().catch(() => "");
+    if (/log in to notion|sign in to continue|登录以继续|Continue with Google|用 Google 账号/i.test(body)) {
+      throw new AuthenticationError(`Notion login wall detected at ${url}`);
+    }
   }
 
   async waitForWorkspaceReady(page: Page): Promise<void> {

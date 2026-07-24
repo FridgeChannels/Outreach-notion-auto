@@ -82,7 +82,7 @@ describe("decideErrorAction", () => {
 });
 
 describe("isRealConversationUrl", () => {
-  it("rejects t=new stubs and prompt pages", () => {
+  it("rejects t=new stubs and bare prompt pages", () => {
     const prompt = "https://app.notion.com/p/FC2-0-Outreach-Controller-Prompt-a2ca22b20dde47a8b63e5b24e8131e5e";
     assert.equal(isRealConversationUrl(`${prompt}?t=new`, [prompt]), false);
     assert.equal(isRealConversationUrl(prompt, [prompt]), false);
@@ -90,6 +90,13 @@ describe("isRealConversationUrl", () => {
       isRealConversationUrl("https://www.notion.so/chat/abc123def456", [prompt]),
       true,
     );
+  });
+
+  it("accepts Agent Prompt URL with durable ?t=threadId", () => {
+    const prompt =
+      "https://app.notion.com/p/FC2-0-Outreach-Controller-Prompt-a2ca22b20dde47a8b63e5b24e8131e5e";
+    const thread = `${prompt}?t=3a79166fd9fd8007aabb00a96a65085c`;
+    assert.equal(isRealConversationUrl(thread, [prompt]), true);
   });
 
   it("accepts chat routes even on notion host", () => {

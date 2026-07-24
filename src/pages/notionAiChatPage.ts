@@ -3,13 +3,15 @@ import {
   CHAT_RUN_TIMEOUT_MS,
   NOTION_AI_MODEL_DEFAULT,
   UI_ACTION_TIMEOUT_MS,
+  AI_PANEL_TIMEOUT_MS,
   OUTREACH_CONTROLLER_PROMPT_URL,
   MAILBOX_REPLY_SCAN_PROMPT_URL,
   toChatEntryUrl,
 } from "../config.js";
-import { ConversationError, AmbiguousExecutionError } from "../errors.js";
+import { ConversationError, AmbiguousExecutionError, AuthenticationError } from "../errors.js";
 import { isRealConversationUrl, knownPromptUrls } from "../flows/validators.js";
 import { logger } from "../logging.js";
+import { NotionLoginPage } from "./notionLoginPage.js";
 
 const ASSISTANT_CORNER = ".notion-assistant-corner-origin-container";
 const AI_FACE = `${ASSISTANT_CORNER} div.notion-ai-button[role="button"][aria-label="ai"]`;
@@ -41,6 +43,17 @@ const URL_CAPTURE_MS = 15_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Same Notion page if origin+pathname match (ignore query/hash). */
+function samePageUrl(a: string, b: string): boolean {
+  try {
+    const ua = new URL(a);
+    const ub = new URL(b);
+    return ua.origin + ua.pathname === ub.origin + ub.pathname;
+  } catch {
+    return a === b;
+  }
 }
 
 function normalizeModelLabel(text: string): string {
@@ -269,10 +282,16 @@ export class NotionAiChatPage {
   async createConversation(page: Page, entryUrl: string): Promise<string | null> {
     this.attachUrlCapture(page);
     const entry = toChatEntryUrl(entryUrl);
-    logger.info("Navigating to chat entry URL", { url: entry, raw: entryUrl });
-    await page.goto(entry, { waitUntil: "domcontentloaded", timeout: 90_000 });
+    // Avoid double-goto after smoke (Notion SPA often fails to mount AI corner on re-nav)
+    if (!samePageUrl(page.url(), entry)) {
+      logger.info("Navigating to chat entry URL", { url: entry, raw: entryUrl });
+      await page.goto(entry, { waitUntil: "domcontentloaded", timeout: 90_000 });
+    } else {
+      logger.info("Already on chat entry URL; skipping re-goto", { url: entry });
+    }
     await this.dismissDialogs(page);
     await sleep(MODAL_WAIT_MS);
+    await new NotionLoginPage().assertLoggedIn(page);
 
     if (!(await this.isChatInputReady(page))) {
       logger.info("AI chat input not visible yet; opening AI panel");
@@ -295,8 +314,9 @@ export class NotionAiChatPage {
   }
 
   /**
-   * Wait until the page navigates to a durable chat/thread URL
-   * (not /new, not Controller Prompt, not a transient redirect).
+   * Wait until we have a durable Agent conversation URL.
+   * Notion often keeps the Prompt /p/ path and only changes `?t=` from `new` → thread id;
+   * after submit the current page URL may already be durable — accept it immediately.
    */
   async waitForConversationUrl(
     page: Page,
@@ -304,30 +324,24 @@ export class NotionAiChatPage {
     timeoutMs = 30_000,
   ): Promise<string> {
     const deadline = Date.now() + timeoutMs;
+    const initialWasDurable = isRealConversationUrl(initialUrl, prompts());
     while (Date.now() < deadline) {
       this.considerCandidateUrl(page.url());
       for (const candidate of this.seenChatUrls) {
-        if (
-          candidate !== initialUrl &&
-          isRealConversationUrl(candidate, prompts())
-        ) {
+        if (!isRealConversationUrl(candidate, prompts())) continue;
+        // Prefer a URL that appeared / changed after a stub start; if we already
+        // started on a durable URL (post-submit), that candidate is fine.
+        if (!initialWasDurable || candidate === page.url() || candidate !== initialUrl) {
           return candidate;
         }
       }
-      const fromDom = await this.extractChatUrlFromDom(page);
+      const fromDom = await this.extractChatUrlFromDom(page).catch(() => null);
       if (fromDom) {
         this.considerCandidateUrl(fromDom);
-        if (
-          fromDom !== initialUrl &&
-          isRealConversationUrl(fromDom, prompts())
-        ) {
-          return fromDom;
-        }
+        if (isRealConversationUrl(fromDom, prompts())) return fromDom;
       }
       const current = page.url();
-      if (current !== initialUrl && isRealConversationUrl(current, prompts())) {
-        return current;
-      }
+      if (isRealConversationUrl(current, prompts())) return current;
       await sleep(300);
     }
     throw new ConversationError(
@@ -463,12 +477,18 @@ export class NotionAiChatPage {
         if (isRealConversationUrl(candidate, prompts())) return candidate;
       }
       this.considerCandidateUrl(page.url());
-      const fromDom = await this.extractChatUrlFromDom(page);
-      if (fromDom) {
-        this.considerCandidateUrl(fromDom);
-        if (isRealConversationUrl(fromDom, prompts())) return fromDom;
-      }
       if (isRealConversationUrl(page.url(), prompts())) return page.url();
+      try {
+        const fromDom = await this.extractChatUrlFromDom(page);
+        if (fromDom) {
+          this.considerCandidateUrl(fromDom);
+          if (isRealConversationUrl(fromDom, prompts())) return fromDom;
+        }
+      } catch (e) {
+        logger.warn(
+          `extractChatUrlFromDom failed (non-fatal): ${e instanceof Error ? e.message : e}`,
+        );
+      }
       await sleep(300);
     }
     for (const candidate of this.seenChatUrls) {
@@ -501,18 +521,73 @@ export class NotionAiChatPage {
   private async openAiPanel(page: Page): Promise<void> {
     if (await this.isChatInputReady(page)) return;
 
+    await this.dismissDialogs(page).catch(() => undefined);
+    await new NotionLoginPage().assertLoggedIn(page);
+
+    if (
+      await page
+        .getByText(/Oops, there was an error loading this page/i)
+        .first()
+        .isVisible()
+        .catch(() => false)
+    ) {
+      throw new ConversationError(`Notion page failed to load: ${page.url()}`);
+    }
+
+    const timeoutMs = AI_PANEL_TIMEOUT_MS;
     const container = page.locator(ASSISTANT_CORNER).first();
-    await container.waitFor({ state: "attached", timeout: UI_ACTION_TIMEOUT_MS });
+    try {
+      await container.waitFor({ state: "attached", timeout: timeoutMs });
+    } catch {
+      // Fallback: some layouts expose ai button without the corner wrapper yet
+      const alt = page.locator('div.notion-ai-button[role="button"][aria-label="ai"]').first();
+      if (await alt.isVisible({ timeout: 3_000 }).catch(() => false)) {
+        await alt.click();
+        await sleep(MODAL_WAIT_MS);
+        await this.dismissDialogs(page);
+        return;
+      }
+      const diag = await this.diagnoseMissingAiPanel(page);
+      throw new ConversationError(
+        `Notion AI panel not found within ${timeoutMs}ms. ${diag}`,
+      );
+    }
+
     const closeInCorner = container.locator('div[role="button"][aria-label="Close"]').first();
     if (await closeInCorner.isVisible().catch(() => false)) {
       await closeInCorner.click();
       await sleep(300);
     }
     const entry = page.locator(AI_FACE).first();
-    await entry.waitFor({ state: "visible", timeout: UI_ACTION_TIMEOUT_MS });
+    await entry.waitFor({ state: "visible", timeout: timeoutMs });
     await entry.locator("xpath=..").click();
     await sleep(MODAL_WAIT_MS);
     await this.dismissDialogs(page);
+  }
+
+  private async diagnoseMissingAiPanel(page: Page): Promise<string> {
+    const info = await page
+      .evaluate(() => {
+        const body = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 180);
+        return {
+          url: location.href,
+          title: document.title,
+          hasLogin: /log in|sign in|登录|繼續|Continue with/i.test(body),
+          hasOops: /oops|error loading/i.test(body),
+          aiButtons: document.querySelectorAll(
+            '[aria-label="ai"], .notion-ai-button, .notion-assistant-corner-origin-container',
+          ).length,
+          bodyPreview: body,
+        };
+      })
+      .catch(() => ({ url: page.url(), title: "", hasLogin: false, hasOops: false, aiButtons: 0, bodyPreview: "" }));
+
+    if (info.hasLogin) {
+      throw new AuthenticationError(
+        `Notion login required on server profile (url=${info.url}). Run: npm run worker:login with NOTION_PROFILE_DIR pointing at the server profile.`,
+      );
+    }
+    return `url=${info.url} title=${JSON.stringify(info.title)} oops=${info.hasOops} aiNodes=${info.aiButtons} body=${JSON.stringify(info.bodyPreview)}`;
   }
 
   private considerCandidateUrl(url: string): void {
@@ -553,23 +628,36 @@ export class NotionAiChatPage {
   }
 
   private async extractChatUrlFromDom(page: Page): Promise<string | null> {
-    return page.evaluate(() => {
-      const anchors = Array.from(document.querySelectorAll("a[href]")) as HTMLAnchorElement[];
+    // Keep this evaluate body free of nested named helpers — tsx/esbuild injects
+    // `__name(...)` for keepNames, which breaks inside the browser sandbox.
+    return page.evaluate(`(() => {
+      const durable = (href) => {
+        try {
+          const u = new URL(href, location.href);
+          const t = u.searchParams.get("t");
+          if (t && t.toLowerCase() !== "new" && /^[0-9a-f-]{20,}$/i.test(t)) return true;
+          if (/\\/chat\\//i.test(u.pathname)) return true;
+          if (u.searchParams.has("threadId") || u.searchParams.has("chatId")) return true;
+          return false;
+        } catch {
+          return false;
+        }
+      };
+      if (durable(location.href)) return location.href;
+      const anchors = Array.from(document.querySelectorAll("a[href]"));
       for (const a of anchors) {
         const href = a.href || "";
-        if (/\/chat\//i.test(href) || /threadId=/i.test(href) || /agent.*chat/i.test(href)) {
-          return href;
-        }
+        if (durable(href) || /agent.*chat/i.test(href)) return href;
       }
-      const copy = document.querySelector<HTMLElement>(
+      const copy = document.querySelector(
         '[aria-label*="Copy link" i], [aria-label*="Copy chat" i], [data-testid*="copy-link"]',
       );
       if (copy) {
-        const nearby = copy.closest("a")?.href;
-        if (nearby) return nearby;
+        const nearby = copy.closest("a") && copy.closest("a").href;
+        if (nearby && durable(nearby)) return nearby;
       }
       return null;
-    });
+    })()`);
   }
 
   private async clickNewChat(page: Page): Promise<void> {

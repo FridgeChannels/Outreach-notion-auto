@@ -1,6 +1,7 @@
 import { acquireLock, releaseLock } from "../locks.js";
 import { claimSession, fetchDueSessions } from "../notion/sessionRepository.js";
 import { fetchDueMailboxes } from "../notion/mailboxRepository.js";
+import { openPersistentBrowserContext } from "../browser.js";
 import { processOutreachJob, type OutreachJob } from "./processOutreach.js";
 import { processMailboxJob, type MailboxJob } from "./processMailbox.js";
 import { logger } from "../logging.js";
@@ -34,11 +35,20 @@ export async function pollAndProcessOutreach(limit = 20): Promise<void> {
   }
 
   if (skipped.length) logger.info(`Skipped ${skipped.length} sessions`, { skipped });
-  if (!jobs.length) logger.info("No due outreach sessions");
+  if (!jobs.length) {
+    logger.info("No due outreach sessions");
+    return;
+  }
 
-  for (const job of jobs) {
-    const result = await processOutreachJob(job);
-    logger.info(`Outreach job finished`, result);
+  // One persistent browser for the whole batch — fewer mkdtemp / profile launches
+  const context = await openPersistentBrowserContext();
+  try {
+    for (const job of jobs) {
+      const result = await processOutreachJob(job, context);
+      logger.info(`Outreach job finished`, { ...result });
+    }
+  } finally {
+    await context.close().catch(() => undefined);
   }
 }
 
@@ -62,11 +72,19 @@ export async function pollAndProcessMailbox(limit = 10): Promise<void> {
   }
 
   if (skipped.length) logger.info(`Skipped ${skipped.length} mailboxes`, { skipped });
-  if (!jobs.length) logger.info("No due mailboxes");
+  if (!jobs.length) {
+    logger.info("No due mailboxes");
+    return;
+  }
 
-  for (const job of jobs) {
-    const result = await processMailboxJob(job);
-    logger.info(`Mailbox job finished`, result);
+  const context = await openPersistentBrowserContext();
+  try {
+    for (const job of jobs) {
+      const result = await processMailboxJob(job, context);
+      logger.info(`Mailbox job finished`, { ...result });
+    }
+  } finally {
+    await context.close().catch(() => undefined);
   }
 }
 

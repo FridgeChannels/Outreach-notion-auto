@@ -1,16 +1,15 @@
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { type BrowserContext, type Page } from "playwright";
 import {
   buildMailboxMessage,
   CHAT_RUN_TIMEOUT_MS,
-  HEADLESS,
   LOCK_HEARTBEAT_INTERVAL_MS,
   MAILBOX_REPLY_SCAN_PROMPT_URL,
   OUTREACH_CONTROLLER_PROMPT_URL,
   MAILBOX_STATUS,
   NOTION_AI_MODEL_DEFAULT,
-  NOTION_PROFILE_DIR,
   WORKER_ID,
 } from "../config.js";
+import { openPersistentBrowserContext } from "../browser.js";
 import { detectExecutionPhase, errorCategoryFromPhase, SkipError } from "../errors.js";
 import { decideErrorAction, isRealConversationUrl, validateMailboxBeforeBrowser } from "./validators.js";
 import {
@@ -49,15 +48,6 @@ export interface ProcessResult {
   error?: string;
 }
 
-async function openPersistentBrowserContext(): Promise<BrowserContext> {
-  return chromium.launchPersistentContext(NOTION_PROFILE_DIR, {
-    headless: HEADLESS,
-    viewport: { width: 1440, height: 1000 },
-    locale: "zh-CN",
-    timezoneId: "Asia/Shanghai",
-  });
-}
-
 /**
  * Persist Conversation URL only after it is a durable chat route and reopens cleanly.
  */
@@ -92,7 +82,10 @@ async function persistVerifiedConversationUrl(
   return conversationUrl;
 }
 
-export async function processMailboxJob(job: MailboxJob): Promise<ProcessResult> {
+export async function processMailboxJob(
+  job: MailboxJob,
+  sharedContext?: BrowserContext,
+): Promise<ProcessResult> {
   const startedAt = new Date();
   const lockPageId = parsePageUrl(job.mailboxPageUrl);
 
@@ -110,6 +103,7 @@ export async function processMailboxJob(job: MailboxJob): Promise<ProcessResult>
 
   let context: BrowserContext | null = null;
   let page: Page | null = null;
+  const ownsContext = !sharedContext;
   const chatPage = new NotionAiChatPage();
   let heartbeat: { stop: () => void } | null = null;
   let tracingSaved = false;
@@ -135,12 +129,12 @@ export async function processMailboxJob(job: MailboxJob): Promise<ProcessResult>
     }
     validateMailboxBeforeBrowser(mailbox);
 
-    context = await openPersistentBrowserContext();
-    await startTracing(context);
+    context = sharedContext ?? (await openPersistentBrowserContext());
+    if (ownsContext) await startTracing(context);
     page = await context.newPage();
 
-    await new NotionLoginPage().assertLoggedIn(page);
     await new NotionWorkspacePage().smokeTestMailbox(page, mailbox.pageUrl);
+    await new NotionLoginPage().assertLoggedIn(page);
 
     await markScanning(mailbox.pageId, startedAt);
 
@@ -275,7 +269,10 @@ export async function processMailboxJob(job: MailboxJob): Promise<ProcessResult>
   } finally {
     heartbeat?.stop();
     await releaseLock("mailbox", mailbox.pageId, job.lockToken);
-    if (context) {
+    if (page) {
+      await page.close().catch(() => undefined);
+    }
+    if (context && ownsContext) {
       try {
         if (!tracingSaved) await stopTracing(context, artifactCtx);
         await context.close();

@@ -1,3 +1,3 @@
-2026/07/23-20:31:08.411 d8a7576 Reusing MANIFEST /Users/markbai/Documents/notion-auto/profiles/outreach-worker/Default/shared_proto_db/metadata/MANIFEST-000001
-2026/07/23-20:31:08.411 d8a7576 Recovering log #3
-2026/07/23-20:31:08.412 d8a7576 Reusing old log /Users/markbai/Documents/notion-auto/profiles/outreach-worker/Default/shared_proto_db/metadata/000003.log 
+2026/07/23-23:53:19.461 12a Reusing MANIFEST /app/profiles/outreach-worker/Default/shared_proto_db/metadata/MANIFEST-000001
+2026/07/23-23:53:19.463 12a Recovering log #3
+2026/07/23-23:53:19.464 12a Reusing old log /app/profiles/outreach-worker/Default/shared_proto_db/metadata/000003.log 
