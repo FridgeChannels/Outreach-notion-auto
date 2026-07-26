@@ -7,6 +7,7 @@ import {
   OUTREACH_CONTROLLER_PROMPT_URL,
   MAILBOX_REPLY_SCAN_PROMPT_URL,
   toChatEntryUrl,
+  extractCompactPageId,
 } from "../config.js";
 import { ConversationError, AmbiguousExecutionError, AuthenticationError } from "../errors.js";
 import { isRealConversationUrl, knownPromptUrls } from "../flows/validators.js";
@@ -38,7 +39,8 @@ const MODAL_WAIT_MS = 1000;
 /** Extra settle after New chat — matches dashboard MODAL_WAIT cadence. */
 const NEW_CHAT_SETTLE_MS = 1_500;
 const TYPE_DELAY_MS = 30;
-const MENTION_CONFIRM_WAIT_MS = 1_000;
+/** Wait for mention/date picker after typing @url (servers are slower). */
+const MENTION_CONFIRM_WAIT_MS = 2_000;
 const URL_CAPTURE_MS = 15_000;
 
 function sleep(ms: number): Promise<void> {
@@ -119,27 +121,44 @@ function extractPageIds(message: string): string[] {
 function messageLooksPresent(actual: string, message: string): boolean {
   const text = normalizeInputCompare(actual).replace(/\u200B/g, "");
   if (!text.includes("请运行")) return false;
-  for (const url of extractHttpUrls(message)) {
-    if (text.includes(url) || text.includes(url.replace(/-/g, ""))) continue;
-    // After @mention resolve, composer may show page title instead of raw URL
-    const id =
-      url.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1] ??
-      url.match(/([0-9a-f]{32})/i)?.[1];
-    if (id && (text.includes(id) || text.includes(id.replace(/-/g, "")))) continue;
-    // Mention chips often drop the URL entirely — require at least page-id count via mentions/links
-    // Fall through: if every expected id is missing from raw text, still allow if we typed @mentions
-    // and text has enough non-empty content after "请运行".
-  }
+  // Reject known bad auto-complete chips (date mention "Today" etc.)
+  if (/\b@Today\b|\b@Tomorrow\b|\b@Yesterday\b/i.test(text)) return false;
+
   const ids = extractPageIds(message);
   if (ids.length === 0) return text.length >= 8;
-  const found = ids.filter(
-    (id) => text.toLowerCase().includes(id) || text.toLowerCase().includes(
-      `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`,
-    ),
-  );
-  // Mentions may render as titled chips without UUID — require instruction + roughly enough length
-  if (found.length >= ids.length) return true;
-  return text.includes("@") || text.length >= Math.min(40, message.length / 2);
+
+  const found = ids.filter((id) => {
+    const dashed = `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`;
+    return text.toLowerCase().includes(id) || text.toLowerCase().includes(dashed);
+  });
+  // Mentions may render as titled chips — still require every expected page id in text/HTML path
+  // (callers should prefer composerHasExpectedPages for DOM href checks)
+  return found.length >= ids.length;
+}
+
+/** True if composer text or link hrefs contain every expected page id from the template. */
+export async function composerHasExpectedPages(page: Page, message: string): Promise<boolean> {
+  const ids = extractPageIds(message);
+  if (!ids.length) return true;
+  const input = await resolveChatInput(page);
+  return input.evaluate((el, expectedIds: string[]) => {
+    const blob = `${el.innerText || ""}\n${el.innerHTML || ""}`.toLowerCase();
+    let hit = 0;
+    for (const id of expectedIds) {
+      const dashed = `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`;
+      if (blob.includes(id) || blob.includes(dashed)) {
+        hit += 1;
+        continue;
+      }
+      const anchors = Array.from(el.querySelectorAll("a[href]")) as HTMLAnchorElement[];
+      const ok = anchors.some((a) => {
+        const href = (a.getAttribute("href") || "").toLowerCase();
+        return href.includes(id) || href.includes(dashed);
+      });
+      if (ok) hit += 1;
+    }
+    return hit >= expectedIds.length;
+  }, ids);
 }
 
 /**
@@ -190,8 +209,8 @@ export async function hasMergedNotionLinks(
 
 /**
  * Fill chat like notion-auto dashboard: keyboard.type the full template.
- * Confirm @mentions with Enter ONLY when a mention picker is open — otherwise
- * Enter submits the composer early (partial message + empty input → false failure).
+ * Confirm @mentions ONLY when a matching page option is visible.
+ * Blind Enter often selects date chip "@Today" and breaks the Prompt/Mailbox URLs.
  */
 export async function typeMultilineChatInput(page: Page, message: string): Promise<void> {
   await typeMentionStyleChatInput(page, message);
@@ -220,26 +239,67 @@ async function isMentionPickerVisible(page: Page): Promise<boolean> {
   return false;
 }
 
-async function confirmMentionIfPickerOpen(page: Page): Promise<boolean> {
+/**
+ * Confirm mention only if an option matches the target page id.
+ * Otherwise Escape — keep the typed @https://… text (never accept @Today).
+ */
+async function confirmMentionForUrl(page: Page, mentionToken: string): Promise<"matched" | "dismissed" | "none"> {
+  const compact =
+    extractCompactPageId(mentionToken.replace(/^@/, "")) ||
+    mentionToken.match(/([0-9a-f]{32})/i)?.[1]?.toLowerCase() ||
+    null;
   const deadline = Date.now() + MENTION_CONFIRM_WAIT_MS;
+  let sawPicker = false;
+
   while (Date.now() < deadline) {
-    if (await isMentionPickerVisible(page)) {
-      await page.keyboard.press("Enter");
-      await sleep(150);
-      return true;
+    if (!(await isMentionPickerVisible(page))) {
+      await sleep(80);
+      continue;
     }
-    await sleep(80);
+    sawPicker = true;
+
+    const options = page.locator('[role="listbox"] [role="option"], [role="option"]');
+    const count = await options.count().catch(() => 0);
+    const labels: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const opt = options.nth(i);
+      if (!(await opt.isVisible().catch(() => false))) continue;
+      const label = ((await opt.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+      const html = ((await opt.innerHTML().catch(() => "")) || "").toLowerCase();
+      labels.push(label.slice(0, 80));
+      if (!compact) continue;
+      const dashed = `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`;
+      if (
+        html.includes(compact) ||
+        html.includes(dashed) ||
+        label.toLowerCase().includes(compact) ||
+        label.toLowerCase().includes(dashed)
+      ) {
+        await opt.click({ timeout: 2_000 });
+        await sleep(150);
+        return "matched";
+      }
+    }
+
+    // Picker open but no matching page (often date "Today") — dismiss, keep typed URL
+    logger.warn("Mention picker had no matching page option; dismissing", {
+      compact,
+      options: labels.slice(0, 6),
+    });
+    await page.keyboard.press("Escape");
+    await sleep(120);
+    return "dismissed";
   }
-  return false;
+  return sawPicker ? "dismissed" : "none";
 }
 
 async function typeMentionStyleChatInput(page: Page, message: string): Promise<void> {
   const parts = message.split(/(@https?:\/\/\S+)/g).filter((p) => p.length > 0);
   let mentionCount = 0;
-  let confirmed = 0;
+  let matched = 0;
+  let dismissed = 0;
 
   for (const part of parts) {
-    // Never continue typing into a running generation
     if (await page.locator(STOP_BUTTON).first().isVisible().catch(() => false)) {
       logger.warn("Stop visible while typing — leaving composer (message may already be submitting)");
       break;
@@ -247,12 +307,10 @@ async function typeMentionStyleChatInput(page: Page, message: string): Promise<v
     if (/^@https?:\/\//i.test(part)) {
       mentionCount += 1;
       await page.keyboard.type(part, { delay: TYPE_DELAY_MS });
-      if (await confirmMentionIfPickerOpen(page)) {
-        confirmed += 1;
-      } else {
-        // No picker: keep raw @url / auto-link in the composer; do NOT press Enter
-        logger.info("No mention picker after @url; skipped Enter to avoid early submit");
-      }
+      const result = await confirmMentionForUrl(page, part);
+      if (result === "matched") matched += 1;
+      else if (result === "dismissed") dismissed += 1;
+      else logger.info("No mention picker after @url; kept typed URL");
     } else {
       await page.keyboard.type(part, { delay: TYPE_DELAY_MS });
     }
@@ -261,7 +319,8 @@ async function typeMentionStyleChatInput(page: Page, message: string): Promise<v
   logger.info("Chat input filled with @mention-style typing", {
     chars: message.length,
     mentionCount,
-    confirmed,
+    matched,
+    dismissed,
   });
 }
 
@@ -462,7 +521,6 @@ export class NotionAiChatPage {
     await input.waitFor({ state: "visible", timeout: UI_ACTION_TIMEOUT_MS });
 
     await input.scrollIntoViewIfNeeded().catch(() => undefined);
-    // Match dashboard: click center of input, short delay, then type
     const box = await input.boundingBox();
     if (box) {
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
@@ -471,44 +529,61 @@ export class NotionAiChatPage {
     }
     await sleep(150);
 
-    await clearChatInput(page);
-    logger.info("Typing chat message into visible AI input…", {
-      messageChars: message.length,
-      preview: message.slice(0, 80).replace(/\n/g, "\\n"),
-    });
-    await typeMultilineChatInput(page, message);
-
     const send = page.locator(SEND_BUTTON).first();
     const stop = page.locator(STOP_BUTTON).first();
 
-    // Enter-on-mention (legacy) or accidental submit: Stop means already generating
-    if (await stop.isVisible().catch(() => false)) {
-      logger.info("Stop visible after fill — treating as already submitted");
-      return;
-    }
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      await clearChatInput(page);
+      // Retry without leading @ — avoids Notion date chip "@Today" stealing the mention
+      const toType =
+        attempt === 1 ? message : message.replace(/@https?:\/\//gi, "https://");
+      logger.info("Typing chat message into visible AI input…", {
+        attempt,
+        messageChars: toType.length,
+        preview: toType.slice(0, 80).replace(/\n/g, "\\n"),
+      });
+      await typeMultilineChatInput(page, toType);
 
-    // @mentions rarely create merged bare-href links; still refuse if glued
-    const merge = await hasMergedNotionLinks(page, message);
-    if (merge.merged) {
-      throw new ConversationError(`Refusing to send merged Notion links: ${merge.detail}`);
-    }
+      if (await stop.isVisible().catch(() => false)) {
+        logger.info("Stop visible after fill — treating as already submitted");
+        return;
+      }
 
-    const actual = normalizeInputCompare(await readChatInputText(page)).replace(/\u200B/g, "");
-    logger.info("Chat input content before send", {
-      chars: actual.length,
-      preview: actual.slice(0, 120).replace(/\n/g, "\\n"),
-    });
-    if (!messageLooksPresent(actual, message)) {
+      const merge = await hasMergedNotionLinks(page, message);
+      if (merge.merged) {
+        throw new ConversationError(`Refusing to send merged Notion links: ${merge.detail}`);
+      }
+
+      const actual = normalizeInputCompare(await readChatInputText(page)).replace(/\u200B/g, "");
+      const okText = messageLooksPresent(actual, message);
+      const okDom = await composerHasExpectedPages(page, message).catch(() => false);
+      logger.info("Chat input content before send", {
+        attempt,
+        chars: actual.length,
+        preview: actual.slice(0, 120).replace(/\n/g, "\\n"),
+        okText,
+        okDom,
+      });
+
+      if (okText || okDom) {
+        await send.waitFor({ state: "visible", timeout: UI_ACTION_TIMEOUT_MS });
+        if ((await send.getAttribute("aria-disabled").catch(() => null)) === "true") {
+          throw new ConversationError("Send button disabled");
+        }
+        await send.click();
+        return;
+      }
+
+      if (attempt === 1) {
+        logger.warn(
+          `Composer missing page links after fill (preview=${JSON.stringify(actual.slice(0, 80))}); retrying without @`,
+        );
+        continue;
+      }
       throw new ConversationError(
-        `Visible chat input missing required content after fill (chars=${actual.length})`,
+        `Visible chat input missing required page links after fill (chars=${actual.length}, preview=${JSON.stringify(actual.slice(0, 80))})`,
       );
     }
-
-    await send.waitFor({ state: "visible", timeout: UI_ACTION_TIMEOUT_MS });
-    if ((await send.getAttribute("aria-disabled").catch(() => null)) === "true") {
-      throw new ConversationError("Send button disabled");
-    }
-    await send.click();
   }
 
   /** Best-effort capture of a durable chat URL (not Prompt/?t=new). */
