@@ -189,39 +189,79 @@ export async function hasMergedNotionLinks(
 }
 
 /**
- * Fill chat like notion-auto dashboard: keyboard.type + Enter to confirm @mentions.
- * Message shape: `请运行… @https://www.notion.so/… ；执行公司： @https://…`
+ * Fill chat like notion-auto dashboard: keyboard.type the full template.
+ * Confirm @mentions with Enter ONLY when a mention picker is open — otherwise
+ * Enter submits the composer early (partial message + empty input → false failure).
  */
 export async function typeMultilineChatInput(page: Page, message: string): Promise<void> {
   await typeMentionStyleChatInput(page, message);
 }
 
+/** Notion page-mention / link suggestion popup (not survey listboxes). */
+async function isMentionPickerVisible(page: Page): Promise<boolean> {
+  const listboxes = page.locator('[role="listbox"]');
+  const n = await listboxes.count().catch(() => 0);
+  for (let i = 0; i < n; i++) {
+    const lb = listboxes.nth(i);
+    if (!(await lb.isVisible().catch(() => false))) continue;
+    const ad = (await lb.getAttribute("aria-activedescendant").catch(() => null)) || "";
+    if (ad.startsWith("survey-option-")) continue;
+    return true;
+  }
+  if (
+    await page
+      .locator('[data-testid*="mention-menu"], [data-testid*="mention-popup"]')
+      .first()
+      .isVisible()
+      .catch(() => false)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+async function confirmMentionIfPickerOpen(page: Page): Promise<boolean> {
+  const deadline = Date.now() + MENTION_CONFIRM_WAIT_MS;
+  while (Date.now() < deadline) {
+    if (await isMentionPickerVisible(page)) {
+      await page.keyboard.press("Enter");
+      await sleep(150);
+      return true;
+    }
+    await sleep(80);
+  }
+  return false;
+}
+
 async function typeMentionStyleChatInput(page: Page, message: string): Promise<void> {
-  // Split so each @https://… is confirmed with Enter (Notion mention picker),
-  // matching dashboard — required after every @ link, not only the last.
   const parts = message.split(/(@https?:\/\/\S+)/g).filter((p) => p.length > 0);
   let mentionCount = 0;
+  let confirmed = 0;
 
   for (const part of parts) {
+    // Never continue typing into a running generation
+    if (await page.locator(STOP_BUTTON).first().isVisible().catch(() => false)) {
+      logger.warn("Stop visible while typing — leaving composer (message may already be submitting)");
+      break;
+    }
     if (/^@https?:\/\//i.test(part)) {
       mentionCount += 1;
       await page.keyboard.type(part, { delay: TYPE_DELAY_MS });
-      await sleep(MENTION_CONFIRM_WAIT_MS);
-      await page.keyboard.press("Enter");
-      await sleep(150);
-      // Enter may submit if no picker was open — stop typing if already generating
-      if (await page.locator(STOP_BUTTON).first().isVisible().catch(() => false)) {
-        logger.warn("Stop visible after mention confirm — message already submitting");
-        break;
+      if (await confirmMentionIfPickerOpen(page)) {
+        confirmed += 1;
+      } else {
+        // No picker: keep raw @url / auto-link in the composer; do NOT press Enter
+        logger.info("No mention picker after @url; skipped Enter to avoid early submit");
       }
     } else {
       await page.keyboard.type(part, { delay: TYPE_DELAY_MS });
     }
   }
-  await sleep(MENTION_CONFIRM_WAIT_MS);
+  await sleep(300);
   logger.info("Chat input filled with @mention-style typing", {
     chars: message.length,
     mentionCount,
+    confirmed,
   });
 }
 
@@ -438,6 +478,15 @@ export class NotionAiChatPage {
     });
     await typeMultilineChatInput(page, message);
 
+    const send = page.locator(SEND_BUTTON).first();
+    const stop = page.locator(STOP_BUTTON).first();
+
+    // Enter-on-mention (legacy) or accidental submit: Stop means already generating
+    if (await stop.isVisible().catch(() => false)) {
+      logger.info("Stop visible after fill — treating as already submitted");
+      return;
+    }
+
     // @mentions rarely create merged bare-href links; still refuse if glued
     const merge = await hasMergedNotionLinks(page, message);
     if (merge.merged) {
@@ -455,13 +504,6 @@ export class NotionAiChatPage {
       );
     }
 
-    const send = page.locator(SEND_BUTTON).first();
-    const stop = page.locator(STOP_BUTTON).first();
-    // Enter during @mention confirm may already have submitted — check Stop first
-    if (await stop.isVisible().catch(() => false)) {
-      logger.info("Stop visible after mention confirm — message already submitting");
-      return;
-    }
     await send.waitFor({ state: "visible", timeout: UI_ACTION_TIMEOUT_MS });
     if ((await send.getAttribute("aria-disabled").catch(() => null)) === "true") {
       throw new ConversationError("Send button disabled");
