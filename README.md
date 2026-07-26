@@ -25,42 +25,53 @@ cp .env.example .env
 # 编辑 .env 填入 NOTION_API_KEY 等
 ```
 
-## 首次登录
+## 首次登录（cookies-only storageState）
+
+与 notion-auto Dashboard 相同：只存 **一个小 JSON**（cookies），不拷 200MB+ Chromium profile。
 
 ```bash
-npm run worker:login
+# 网页登录，账号名随意（多账号各登一次）
+PLAYWRIGHT_HEADLESS=false npm run worker:login -- --account=mark
+# → 生成 auth/mark.json（通常几十 KB）
+
+# 若已有旧 profile，可免重新登录导出：
+NOTION_PROFILE_DIR=/path/to/profiles/outreach-worker \
+  npm run worker:export-auth -- --account=mark
 ```
 
-在浏览器完成 Notion 登录后，回到终端按 Enter。登录态写入 `NOTION_PROFILE_DIR`（默认 `./profiles/outreach-worker`）。
-
-### 传到 Linux 服务器（无图形界面）
-
-**不要把 `profiles/` 提交到 GitHub。** 目录里是完整 Notion 会话 Cookie/Token，进仓库等于公开账号。代码走 Git；登录态用 `scp`/`rsync` 单独拷。
-
-本机（已登录）：
+`.env`：
 
 ```bash
-# 先停掉本地 worker，避免 profile 被锁
-tar czf /tmp/outreach-profile.tgz -C profiles outreach-worker
-scp /tmp/outreach-profile.tgz user@your-server:/tmp/
-rm /tmp/outreach-profile.tgz
+NOTION_AUTH_DIR=./auth
+NOTION_ACCOUNT=mark
+WORKER_ID=worker-mark-1
+```
+
+### 发布到 Linux / S3
+
+**只上传 `auth/<account>.json`**（不要传 `profiles/`，也不要提交 GitHub）。
+
+```bash
+# 每次发布可顺带带上小文件；登录过期才需要重新 login
+aws s3 cp auth/mark.json s3://your-bucket/outreach/auth/mark.json
 ```
 
 服务器：
 
 ```bash
-cd /path/to/Outreach-notion-auto
-mkdir -p profiles
-tar xzf /tmp/outreach-profile.tgz -C profiles
-# 清掉跨机拷贝残留的 Chromium 锁
-rm -f profiles/outreach-worker/SingletonLock \
-      profiles/outreach-worker/SingletonCookie \
-      profiles/outreach-worker/SingletonSocket
-# .env 里：NOTION_PROFILE_DIR=./profiles/outreach-worker
-# Docker：compose 已挂载 ./profiles → /app/profiles
+mkdir -p auth
+aws s3 cp s3://your-bucket/outreach/auth/mark.json auth/mark.json
+# NOTION_ACCOUNT=mark
 ```
 
-之后过期再在本机 `npm run worker:login`，重新打包上传覆盖即可。Mac → Linux 的 Playwright Chromium profile 一般可直接用。
+### 多账号并行
+
+每个账号一个 JSON + 一个 worker 进程（互不抢 Chromium profile 锁）：
+
+```bash
+NOTION_ACCOUNT=mark  WORKER_ID=worker-mark  npm run worker &
+NOTION_ACCOUNT=hayes WORKER_ID=worker-hayes npm run worker &
+```
 
 ## 运行
 
@@ -81,22 +92,13 @@ npm run worker
 
 ## Docker / Compose
 
-先在宿主机完成 Notion 登录（浏览器需交互），把 profile 放到 `./profiles/outreach-worker`：
-
 ```bash
-cp .env.example .env   # 填入 NOTION_API_KEY 等
-npm install
-npx playwright install chromium
-# 确保 NOTION_PROFILE_DIR=./profiles/outreach-worker
-npm run worker:login
+PLAYWRIGHT_HEADLESS=false npm run worker:login -- --account=default
+# 确保 auth/default.json 存在；compose 挂载 ./auth
+docker compose up -d --build
 ```
 
-若已有登录态（例如 `notion-auto/profiles/outreach-worker`），可复制过来：
-
-```bash
-mkdir -p profiles
-cp -R /path/to/profiles/outreach-worker ./profiles/
-```
+多账号可复制 `outreach-worker` 服务块，改 `NOTION_ACCOUNT` / `WORKER_ID` / `container_name`。
 
 构建并后台启动：
 

@@ -11,7 +11,7 @@ import {
   SESSION_WRITEBACK_TIMEOUT_MS,
   WORKER_ID,
 } from "../config.js";
-import { openPersistentBrowserContext } from "../browser.js";
+import { openPersistentBrowserContext, closeBrowserContext } from "../browser.js";
 import { detectExecutionPhase, errorCategoryFromPhase, SkipError } from "../errors.js";
 import {
   decideErrorAction,
@@ -344,7 +344,7 @@ export async function processOutreachJob(
     if (context && ownsContext) {
       try {
         if (!tracingSaved) await stopTracing(context, artifactCtx);
-        await context.close();
+        await closeBrowserContext(context);
       } catch {
         // ignore
       }

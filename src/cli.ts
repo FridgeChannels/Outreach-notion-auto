@@ -27,7 +27,8 @@ Usage:
   npm run worker:once            Single poll cycle for both queues
   npm run worker:outreach        Single poll for Outreach Session queue
   npm run worker:mailbox         Single poll for Mailbox Scan queue
-  npm run worker:login           One-time Notion login into NOTION_PROFILE_DIR
+  npm run worker:login           Interactive web login → auth/<account>.json
+  npm run worker:export-auth     Export cookies from old NOTION_PROFILE_DIR
   npm run worker:diagnose        Inspect due sessions / mailboxes
 
 Env: see .env.example

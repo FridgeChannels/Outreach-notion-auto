@@ -9,7 +9,19 @@ export const MAILBOX_REPLY_SCAN_PROMPT_URL =
 export const SESSION_DATA_SOURCE_URL = process.env.SESSION_DATA_SOURCE_URL?.trim() || "";
 export const MAILBOX_STATE_DATA_SOURCE_URL =
   process.env.MAILBOX_STATE_DATA_SOURCE_URL?.trim() || "";
+
+/**
+ * Cookies-only Playwright storageState (preferred).
+ * Multi-account: auth/<account>.json + NOTION_ACCOUNT=<account>
+ * Or set NOTION_AUTH_STATE_PATH to an explicit file.
+ */
+export const NOTION_AUTH_DIR = process.env.NOTION_AUTH_DIR?.trim() || "./auth";
+export const NOTION_ACCOUNT = process.env.NOTION_ACCOUNT?.trim() || "";
+export const NOTION_AUTH_STATE_PATH = process.env.NOTION_AUTH_STATE_PATH?.trim() || "";
+
+/** @deprecated Prefer NOTION_AUTH_* — kept only for one-shot export-from-profile. */
 export const NOTION_PROFILE_DIR = process.env.NOTION_PROFILE_DIR?.trim() || "";
+
 export const ARTIFACT_DIR = process.env.ARTIFACT_DIR?.trim() || "artifacts";
 /** Full Playwright traces are ~100–200MB each. Default off; set PLAYWRIGHT_TRACE=true to enable. */
 export const PLAYWRIGHT_TRACE = process.env.PLAYWRIGHT_TRACE === "true";
@@ -165,7 +177,11 @@ export function buildMailboxMessage(mailboxStatePageUrl: string): string {
 export function validateEnv(queues: Array<"outreach" | "mailbox"> = ["outreach", "mailbox"]): string[] {
   const missing: string[] = [];
   if (!process.env.NOTION_API_KEY?.trim()) missing.push("NOTION_API_KEY");
-  if (!process.env.NOTION_PROFILE_DIR?.trim()) missing.push("NOTION_PROFILE_DIR");
+  const hasAuthFile = Boolean(process.env.NOTION_AUTH_STATE_PATH?.trim());
+  const hasAccount = Boolean(process.env.NOTION_ACCOUNT?.trim());
+  if (!hasAuthFile && !hasAccount) {
+    missing.push("NOTION_ACCOUNT (or NOTION_AUTH_STATE_PATH)");
+  }
   if (queues.includes("outreach")) {
     if (!process.env.OUTREACH_CONTROLLER_PROMPT_URL?.trim()) {
       missing.push("OUTREACH_CONTROLLER_PROMPT_URL");

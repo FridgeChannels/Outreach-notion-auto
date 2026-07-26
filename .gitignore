@@ -6,4 +6,8 @@ dist/
 data/session-locks/
 data/mailbox-locks/
 artifacts/
+.playwright-tmp/
 .playwright/
+# Chromium profiles (legacy) + cookies auth — never commit
+profiles/
+auth/

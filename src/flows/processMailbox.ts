@@ -9,7 +9,7 @@ import {
   NOTION_AI_MODEL_DEFAULT,
   WORKER_ID,
 } from "../config.js";
-import { openPersistentBrowserContext } from "../browser.js";
+import { openPersistentBrowserContext, closeBrowserContext } from "../browser.js";
 import { detectExecutionPhase, errorCategoryFromPhase, SkipError } from "../errors.js";
 import { decideErrorAction, isRealConversationUrl, validateMailboxBeforeBrowser } from "./validators.js";
 import {
@@ -275,7 +275,7 @@ export async function processMailboxJob(
     if (context && ownsContext) {
       try {
         if (!tracingSaved) await stopTracing(context, artifactCtx);
-        await context.close();
+        await closeBrowserContext(context);
       } catch {
         // ignore
       }

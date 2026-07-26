@@ -1,22 +1,33 @@
-import { mkdir, mkdtemp, rm, access, constants, unlink, statfs, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, access, constants, statfs, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { chromium, type BrowserContext } from "playwright";
-import { HEADLESS, NOTION_PROFILE_DIR } from "./config.js";
+import { chromium, type Browser, type BrowserContext } from "playwright";
+import {
+  hasUsableSavedAuth,
+  loadStorageStateCookiesOnly,
+  resolveAuthStatePath,
+  type CookiesOnlyState,
+} from "./auth.js";
+import { HEADLESS } from "./config.js";
 import { logger } from "./logging.js";
 
 const MIN_FREE_BYTES = 512 * 1024 * 1024; // 512MB
 const LAUNCH_ATTEMPTS = 4;
+
+const browsersByContext = new WeakMap<BrowserContext, Browser>();
+
+const CHROMIUM_ARGS = [
+  "--disable-dev-shm-usage",
+  "--no-sandbox",
+  "--disable-gpu",
+  "--disable-software-rasterizer",
+];
 
 /** Project-local temp — never rely on system /tmp (Docker + macOS APFS EIO). */
 export function playwrightTempRoot(): string {
   return join(process.cwd(), ".playwright-tmp");
 }
 
-/**
- * Force Node + Playwright temp dirs onto the project volume before any launch.
- * Also set env early so any remaining os.tmpdir() callers stay on-project.
- */
 export async function configurePlaywrightTempDir(): Promise<string> {
   const root = playwrightTempRoot();
   await mkdir(root, { recursive: true });
@@ -47,30 +58,11 @@ export async function assertDiskSpaceForBrowser(): Promise<void> {
   }
 }
 
-/** Remove Chromium profile locks left by crashed workers (same profile, new launch). */
-export async function clearStaleProfileLocks(profileDir: string): Promise<void> {
-  if (!profileDir || !existsSync(profileDir)) return;
-  for (const name of ["SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"]) {
-    const p = join(profileDir, name);
-    try {
-      await unlink(p);
-      logger.warn(`Removed stale Chromium lock: ${p}`);
-    } catch {
-      // ignore missing
-    }
-  }
-}
-
-/**
- * Explicit artifacts dir — Playwright skips mkdtemp('/tmp/playwright-artifacts-*')
- * when options.artifactsDir is set (see playwright-core _prepareToLaunch).
- */
 async function createArtifactsDir(): Promise<string> {
   const root = await configurePlaywrightTempDir();
   return mkdtemp(join(root, "playwright-artifacts-"));
 }
 
-/** Best-effort cleanup of old artifact folders (keep last few). */
 async function pruneOldArtifactDirs(keep = 3): Promise<void> {
   const root = playwrightTempRoot();
   if (!existsSync(root)) return;
@@ -94,38 +86,52 @@ function isTransientLaunchError(e: unknown): boolean {
   );
 }
 
-export async function openPersistentBrowserContext(): Promise<BrowserContext> {
-  if (!NOTION_PROFILE_DIR) {
-    throw new Error("NOTION_PROFILE_DIR is not configured");
-  }
-
+/**
+ * Launch Chromium + inject cookies-only storageState (multi-account safe).
+ * Each account = one JSON file; many workers can run in parallel with different files.
+ */
+export async function openBrowserContext(options?: {
+  authPath?: string;
+  storageState?: CookiesOnlyState;
+  headless?: boolean;
+}): Promise<BrowserContext> {
   await configurePlaywrightTempDir();
   await assertDiskSpaceForBrowser();
-  await mkdir(NOTION_PROFILE_DIR, { recursive: true });
   await pruneOldArtifactDirs();
 
+  const authPath = options?.authPath ?? resolveAuthStatePath();
+  const storageState =
+    options?.storageState ?? (await loadStorageStateCookiesOnly(authPath));
+  if (!hasUsableSavedAuth(storageState)) {
+    throw new Error(
+      `No usable Notion auth cookies at ${authPath}. Run: npm run worker:login -- --account=<name>`,
+    );
+  }
+
+  const headless = options?.headless ?? HEADLESS;
   let last: unknown;
+
   for (let attempt = 1; attempt <= LAUNCH_ATTEMPTS; attempt++) {
     let artifactsDir: string | null = null;
     try {
-      await clearStaleProfileLocks(NOTION_PROFILE_DIR);
       artifactsDir = await createArtifactsDir();
-      const context = await chromium.launchPersistentContext(NOTION_PROFILE_DIR, {
-        headless: HEADLESS,
+      const browser = await chromium.launch({
+        headless,
+        args: CHROMIUM_ARGS,
+        // downloads/traces under project temp — avoid /tmp mkdtemp EIO
+        tracesDir: artifactsDir,
+      });
+      const context = await browser.newContext({
+        storageState,
         viewport: { width: 1440, height: 1000 },
         locale: "zh-CN",
         timezoneId: "Asia/Shanghai",
-        // Critical: bypass system /tmp mkdtemp entirely
-        artifactsDir,
-        args: [
-          "--disable-dev-shm-usage",
-          "--no-sandbox",
-          "--disable-gpu",
-          "--disable-software-rasterizer",
-        ],
       });
+      browsersByContext.set(context, browser);
       if (attempt > 1) logger.info(`Browser launch succeeded on attempt ${attempt}`);
-      logger.info("Browser launched", {
+      logger.info("Browser launched (storageState)", {
+        authPath,
+        cookieCount: storageState?.cookies?.length ?? 0,
         artifactsDir,
         tmpdir: process.env.TMPDIR,
       });
@@ -147,20 +153,60 @@ export async function openPersistentBrowserContext(): Promise<BrowserContext> {
   throw last;
 }
 
+/** @deprecated Use openBrowserContext — kept for call-site compatibility. */
+export const openPersistentBrowserContext = openBrowserContext;
+
+/** Close context and underlying browser (storageState mode owns the Browser). */
+export async function closeBrowserContext(context: BrowserContext): Promise<void> {
+  const browser = browsersByContext.get(context);
+  await context.close().catch(() => undefined);
+  if (browser) await browser.close().catch(() => undefined);
+}
+
+/**
+ * Fresh headed browser with no cookies — for interactive login / export.
+ * Caller must closeBrowserContext when done.
+ */
+export async function openLoginBrowserContext(headless = false): Promise<BrowserContext> {
+  await configurePlaywrightTempDir();
+  await assertDiskSpaceForBrowser();
+  const artifactsDir = await createArtifactsDir();
+  const browser = await chromium.launch({
+    headless,
+    args: CHROMIUM_ARGS,
+    tracesDir: artifactsDir,
+  });
+  const context = await browser.newContext({
+    viewport: { width: 1440, height: 1000 },
+    locale: "zh-CN",
+    timezoneId: "Asia/Shanghai",
+  });
+  browsersByContext.set(context, browser);
+  return context;
+}
+
 export async function preflightBrowserEnvironment(): Promise<void> {
   await configurePlaywrightTempDir();
   await assertDiskSpaceForBrowser();
-  if (NOTION_PROFILE_DIR) {
-    await mkdir(NOTION_PROFILE_DIR, { recursive: true });
-    await access(NOTION_PROFILE_DIR, constants.R_OK | constants.W_OK);
+  const authPath = resolveAuthStatePath();
+  const state = await loadStorageStateCookiesOnly(authPath);
+  if (!hasUsableSavedAuth(state)) {
+    throw new Error(
+      `Auth preflight failed: missing cookies at ${authPath}. Run worker:login first.`,
+    );
   }
-  // Prove we can create the exact prefix Playwright would use — on project volume
+  try {
+    await access(authPath, constants.R_OK);
+  } catch {
+    throw new Error(`Auth file not readable: ${authPath}`);
+  }
   const probe = await createArtifactsDir();
   await rm(probe, { recursive: true, force: true });
   const free = await freeBytesForPath(playwrightTempRoot());
   logger.info("Browser preflight OK", {
     tmpdir: process.env.TMPDIR,
-    profile: NOTION_PROFILE_DIR,
+    authPath,
+    cookieCount: state?.cookies?.length ?? 0,
     freeMb: free != null ? Math.round(free / 1e6) : null,
   });
 }

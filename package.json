@@ -9,6 +9,7 @@
     "worker:outreach": "tsx src/cli.ts --once --queue=outreach",
     "worker:mailbox": "tsx src/cli.ts --once --queue=mailbox",
     "worker:login": "tsx scripts/login.ts",
+    "worker:export-auth": "tsx scripts/export-auth.ts",
     "worker:diagnose": "tsx scripts/diagnose.ts",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",

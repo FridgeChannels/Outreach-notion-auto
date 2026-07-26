@@ -9,23 +9,20 @@ services:
     env_file:
       - .env
     environment:
-      # Override host-specific paths from .env for in-container layout
-      NOTION_PROFILE_DIR: /app/profiles/outreach-worker
+      NOTION_AUTH_DIR: /app/auth
+      NOTION_ACCOUNT: ${NOTION_ACCOUNT:-default}
       ARTIFACT_DIR: artifacts
       PLAYWRIGHT_HEADLESS: "true"
       WORKER_ID: ${WORKER_ID:-worker-docker-1}
       TZ: Asia/Shanghai
-      # Never use container /tmp for Playwright (Docker Desktop I/O corruption → EIO)
       TMPDIR: /app/.playwright-tmp
       TEMP: /app/.playwright-tmp
       TMP: /app/.playwright-tmp
     volumes:
-      # Persist Notion login session (login once on host, then mount)
-      - ./profiles:/app/profiles
+      - ./auth:/app/auth
       - ./data:/app/data
       - ./artifacts:/app/artifacts
       - ./log:/app/log
       - ./.playwright-tmp:/app/.playwright-tmp
-    # Chromium needs shared memory; default 64MB is often too small
     shm_size: "2gb"
     init: true

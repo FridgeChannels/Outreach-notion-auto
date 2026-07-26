@@ -1,33 +1,48 @@
 import "dotenv/config";
-import { configurePlaywrightTempDir, openPersistentBrowserContext, preflightBrowserEnvironment } from "../src/browser.js";
-import { NOTION_PROFILE_DIR } from "../src/config.js";
+import {
+  closeBrowserContext,
+  configurePlaywrightTempDir,
+  openLoginBrowserContext,
+} from "../src/browser.js";
+import { resolveAuthStatePath, saveStorageStateCookiesOnly } from "../src/auth.js";
+
+function parseAccount(args: string[]): string {
+  const flag = args.find((a) => a.startsWith("--account="));
+  if (flag) return flag.slice("--account=".length).trim();
+  const idx = args.indexOf("--account");
+  if (idx >= 0 && args[idx + 1]) return args[idx + 1].trim();
+  return process.env.NOTION_ACCOUNT?.trim() || "default";
+}
 
 async function main(): Promise<void> {
-  await preflightBrowserEnvironment();
+  const account = parseAccount(process.argv.slice(2));
+  const authPath = resolveAuthStatePath(account);
+
   await configurePlaywrightTempDir();
+  console.log(`Account: ${account}`);
+  console.log(`Will save cookies-only storageState → ${authPath}`);
+  console.log("Log in to Notion in the browser, then press Enter here to save.\n");
 
-  const dir = NOTION_PROFILE_DIR || "./profiles/outreach-worker";
-  console.log(`Opening browser; profile dir: ${dir}`);
-  console.log(`Playwright TMPDIR: ${process.env.TMPDIR}`);
-  console.log("Log in to Notion, then press Enter in this terminal to save and exit.\n");
-
-  // Prefer shared launcher (temp dir + retries + stale lock clear).
-  // Login is interactive → force headed via env if needed.
   if (process.env.PLAYWRIGHT_HEADLESS === "true") {
-    console.warn("PLAYWRIGHT_HEADLESS=true — set false for interactive login.");
+    console.warn("Hint: set PLAYWRIGHT_HEADLESS=false for interactive login.");
   }
 
-  const context = await openPersistentBrowserContext();
-  const page = await context.newPage();
-  await page.goto("https://www.notion.so", { waitUntil: "domcontentloaded", timeout: 90_000 });
+  const context = await openLoginBrowserContext(false);
+  try {
+    const page = await context.newPage();
+    await page.goto("https://www.notion.so", { waitUntil: "domcontentloaded", timeout: 90_000 });
 
-  await new Promise<void>((resolve) => {
-    process.stdin.resume();
-    process.stdin.once("data", () => resolve());
-  });
+    await new Promise<void>((resolve) => {
+      process.stdin.resume();
+      process.stdin.once("data", () => resolve());
+    });
 
-  await context.close();
-  console.log(`Login saved to ${dir}`);
+    await saveStorageStateCookiesOnly(context, authPath);
+    console.log(`Saved cookies-only auth → ${authPath}`);
+    console.log("Upload this small JSON to the server/S3 (not the profiles/ directory).");
+  } finally {
+    await closeBrowserContext(context);
+  }
 }
 
 main().catch((err) => {

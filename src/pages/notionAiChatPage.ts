@@ -584,7 +584,7 @@ export class NotionAiChatPage {
 
     if (info.hasLogin) {
       throw new AuthenticationError(
-        `Notion login required on server profile (url=${info.url}). Run: npm run worker:login with NOTION_PROFILE_DIR pointing at the server profile.`,
+        `Notion login required (url=${info.url}). Re-run: npm run worker:login -- --account=<name> and deploy auth/<account>.json`,
       );
     }
     return `url=${info.url} title=${JSON.stringify(info.title)} oops=${info.hasOops} aiNodes=${info.aiButtons} body=${JSON.stringify(info.bodyPreview)}`;

@@ -1,7 +1,7 @@
 import { acquireLock, releaseLock } from "../locks.js";
 import { claimSession, fetchDueSessions } from "../notion/sessionRepository.js";
 import { fetchDueMailboxes } from "../notion/mailboxRepository.js";
-import { openPersistentBrowserContext } from "../browser.js";
+import { closeBrowserContext, openBrowserContext } from "../browser.js";
 import { processOutreachJob, type OutreachJob } from "./processOutreach.js";
 import { processMailboxJob, type MailboxJob } from "./processMailbox.js";
 import { logger } from "../logging.js";
@@ -40,15 +40,15 @@ export async function pollAndProcessOutreach(limit = 20): Promise<void> {
     return;
   }
 
-  // One persistent browser for the whole batch — fewer mkdtemp / profile launches
-  const context = await openPersistentBrowserContext();
+  // One browser context per batch (same account). Multi-account = multiple workers.
+  const context = await openBrowserContext();
   try {
     for (const job of jobs) {
       const result = await processOutreachJob(job, context);
       logger.info(`Outreach job finished`, { ...result });
     }
   } finally {
-    await context.close().catch(() => undefined);
+    await closeBrowserContext(context);
   }
 }
 
@@ -77,14 +77,14 @@ export async function pollAndProcessMailbox(limit = 10): Promise<void> {
     return;
   }
 
-  const context = await openPersistentBrowserContext();
+  const context = await openBrowserContext();
   try {
     for (const job of jobs) {
       const result = await processMailboxJob(job, context);
       logger.info(`Mailbox job finished`, { ...result });
     }
   } finally {
-    await context.close().catch(() => undefined);
+    await closeBrowserContext(context);
   }
 }
 
