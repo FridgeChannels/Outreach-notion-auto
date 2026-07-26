@@ -10,4 +10,3 @@ artifacts/
 .playwright/
 # Chromium profiles (legacy) + cookies auth — never commit
 profiles/
-auth/
