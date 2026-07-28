@@ -871,8 +871,26 @@ export class NotionAiChatPage {
       await sleep(200);
     }
 
+    // Notion AI can pause behind a transient blue "Continue" CTA.
+    // Treat it as a recoverable blocker and resume automatically.
+    await this.clickContinueButton(page);
+
     // Notion AI error banner: "Something went wrong…" + X, blocks composer
     await this.dismissAiErrorBanner(page);
+  }
+
+  /** Resume a paused AI run when Notion shows a visible "Continue" button. */
+  private async clickContinueButton(page: Page): Promise<boolean> {
+    const button = page
+      .locator(
+        '[role="button"]:has-text("Continue"), button:has-text("Continue"), div[role="button"]:has-text("Continue")',
+      )
+      .first();
+    if (!(await button.isVisible().catch(() => false))) return false;
+    logger.warn('Clicking Notion AI "Continue" button');
+    await button.click({ timeout: 1500 }).catch(() => undefined);
+    await sleep(400);
+    return true;
   }
 
   /** Click the X on the red AI error strip so the composer unlocks. */
@@ -920,6 +938,20 @@ export class NotionAiChatPage {
   async detectChatRuntimeError(page: Page): Promise<string | null> {
     return page.evaluate(() => {
       const body = document.body?.innerText ?? "";
+      // Blue CTA is resumable, not a fatal runtime error.
+      const continueButtons = Array.from(
+        document.querySelectorAll('button, [role="button"]'),
+      ) as HTMLElement[];
+      const hasVisibleContinue = continueButtons.some((el) => {
+        const text = (el.innerText || el.textContent || "").trim();
+        const style = window.getComputedStyle(el);
+        return (
+          /^continue$/i.test(text) &&
+          style.display !== "none" &&
+          style.visibility !== "hidden"
+        );
+      });
+      if (hasVisibleContinue) return null;
       if (/Something went wrong while processing your request/i.test(body)) {
         return "Notion AI: Something went wrong while processing your request";
       }
@@ -943,6 +975,10 @@ export class NotionAiChatPage {
 
     while (Date.now() < deadline) {
       await this.dismissDialogs(page).catch(() => undefined);
+      if (await this.clickContinueButton(page).catch(() => false)) {
+        await sleep(POLL_MS);
+        continue;
+      }
 
       const runtimeErr = await this.detectChatRuntimeError(page);
       if (runtimeErr) {

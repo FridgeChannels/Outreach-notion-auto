@@ -27,6 +27,11 @@ export const ARTIFACT_DIR = process.env.ARTIFACT_DIR?.trim() || "artifacts";
 export const PLAYWRIGHT_TRACE = process.env.PLAYWRIGHT_TRACE === "true";
 
 export const SESSION_POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS) || 5 * 60 * 1000;
+/** Max due Sessions claimed per poll cycle per worker (keep small when many workers). */
+export const OUTREACH_BATCH_LIMIT = Math.max(
+  1,
+  Number(process.env.OUTREACH_BATCH_LIMIT) || 10,
+);
 export const CHAT_RUN_TIMEOUT_MS = 10 * 60 * 1000;
 /** After chat UI looks idle, keep polling Session until it leaves Running/Claimed. */
 export const SESSION_WRITEBACK_TIMEOUT_MS =

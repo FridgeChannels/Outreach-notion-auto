@@ -1,4 +1,5 @@
 services:
+  # Example single worker (or use npm run workers:start on the host for N accounts).
   outreach-worker:
     build:
       context: .
@@ -11,13 +12,14 @@ services:
     environment:
       NOTION_AUTH_DIR: /app/auth
       NOTION_ACCOUNT: ${NOTION_ACCOUNT:-default}
-      ARTIFACT_DIR: artifacts
+      ARTIFACT_DIR: artifacts/${NOTION_ACCOUNT:-default}
       PLAYWRIGHT_HEADLESS: "true"
-      WORKER_ID: ${WORKER_ID:-worker-docker-1}
+      WORKER_ID: worker-${NOTION_ACCOUNT:-default}
+      OUTREACH_BATCH_LIMIT: ${OUTREACH_BATCH_LIMIT:-10}
       TZ: Asia/Shanghai
-      TMPDIR: /app/.playwright-tmp
-      TEMP: /app/.playwright-tmp
-      TMP: /app/.playwright-tmp
+      TMPDIR: /app/.playwright-tmp/${NOTION_ACCOUNT:-default}
+      TEMP: /app/.playwright-tmp/${NOTION_ACCOUNT:-default}
+      TMP: /app/.playwright-tmp/${NOTION_ACCOUNT:-default}
     volumes:
       - ./auth:/app/auth
       - ./data:/app/data
@@ -26,3 +28,37 @@ services:
       - ./.playwright-tmp:/app/.playwright-tmp
     shm_size: "2gb"
     init: true
+    profiles: ["single"]
+
+  # Second account example — copy this block to add more; do NOT use `compose scale`.
+  # Shared ./data provides session/execution locks across containers on one host.
+  outreach-worker-b:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: outreach-notion-auto:latest
+    container_name: outreach-notion-auto-b
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NOTION_AUTH_DIR: /app/auth
+      NOTION_ACCOUNT: ${NOTION_ACCOUNT_B:-acct2}
+      ARTIFACT_DIR: artifacts/${NOTION_ACCOUNT_B:-acct2}
+      PLAYWRIGHT_HEADLESS: "true"
+      WORKER_ID: worker-${NOTION_ACCOUNT_B:-acct2}
+      OUTREACH_BATCH_LIMIT: ${OUTREACH_BATCH_LIMIT:-10}
+      TZ: Asia/Shanghai
+      TMPDIR: /app/.playwright-tmp/${NOTION_ACCOUNT_B:-acct2}
+      TEMP: /app/.playwright-tmp/${NOTION_ACCOUNT_B:-acct2}
+      TMP: /app/.playwright-tmp/${NOTION_ACCOUNT_B:-acct2}
+    command: ["npx", "tsx", "src/cli.ts", "--queue=outreach"]
+    volumes:
+      - ./auth:/app/auth
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./log:/app/log
+      - ./.playwright-tmp:/app/.playwright-tmp
+    shm_size: "2gb"
+    init: true
+    profiles: ["multi"]

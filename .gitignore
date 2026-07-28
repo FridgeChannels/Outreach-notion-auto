@@ -8,5 +8,6 @@ data/mailbox-locks/
 artifacts/
 .playwright-tmp/
 .playwright/
+log/
 # Chromium profiles (legacy) + cookies auth — never commit
 profiles/

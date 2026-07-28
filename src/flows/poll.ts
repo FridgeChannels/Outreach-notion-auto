@@ -12,13 +12,16 @@ import { processOutreachJob, type OutreachJob } from "./processOutreach.js";
 import { processMailboxJob, type MailboxJob } from "./processMailbox.js";
 import { logger } from "../logging.js";
 import { startTracing, stopTracing } from "../artifacts.js";
+import { OUTREACH_BATCH_LIMIT } from "../config.js";
 
 /**
  * Lazy claim: lock + claim one Session at a time inside the batch loop.
  * Avoids pre-claiming the whole due set (which left Claimed orphans when
  * waiting locks expired mid-batch).
  */
-export async function pollAndProcessOutreach(limit = 20): Promise<void> {
+export async function pollAndProcessOutreach(
+  limit = OUTREACH_BATCH_LIMIT,
+): Promise<void> {
   const reclaim = await reclaimStuckSessions();
   if (reclaim.reclaimed || reclaim.reconciled) {
     logger.info("Reclaimed stuck sessions", {

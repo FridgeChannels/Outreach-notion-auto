@@ -76,22 +76,36 @@ interface PropIds {
 
 let cachedDsId: string | null = null;
 let cachedIds: PropIds | null = null;
+let cachedStatusFieldType: "status" | "select" = "status";
+let cachedNextActionFieldType: "status" | "select" = "select";
 
 async function dsId(): Promise<string> {
   if (!cachedDsId) cachedDsId = await resolveDataSourceId(SESSION_DATA_SOURCE_URL);
   return cachedDsId;
 }
 
+function statusEqualsFilter(statusPropId: string, name: string): Record<string, unknown> {
+  return cachedStatusFieldType === "status"
+    ? { property: statusPropId, status: { equals: name } }
+    : { property: statusPropId, select: { equals: name } };
+}
+
 async function propIds(): Promise<PropIds> {
   if (cachedIds) return cachedIds;
   const client = getNotionClient();
-  const ds = await client.dataSources.retrieve({ data_source_id: await dsId() });
+  const ds = await withNotionRetry("sessionDataSource.retrieve", async () =>
+    client.dataSources.retrieve({ data_source_id: await dsId() }),
+  );
   const props = ("properties" in ds && ds.properties) || {};
   const req = (name: string) => {
     const id = findPropertyId(props, name);
     if (!id) throw new Error(`Session property not found: ${name}`);
     return id;
   };
+  const statusProp = props[req(PROP.STATUS)] as { type?: string } | undefined;
+  const nextActionProp = props[req(PROP.NEXT_ACTION)] as { type?: string } | undefined;
+  cachedStatusFieldType = statusProp?.type === "status" ? "status" : "select";
+  cachedNextActionFieldType = nextActionProp?.type === "status" ? "status" : "select";
   cachedIds = {
     sessionId: req(PROP.SESSION_ID),
     client: req(PROP.CLIENT),
@@ -329,14 +343,10 @@ export async function fetchDueSessions(limit = 20): Promise<DueSessionRow[]> {
   const client = getNotionClient();
   const ids = await propIds();
   const dataSourceId = await dsId();
-  const ds = await client.dataSources.retrieve({ data_source_id: dataSourceId });
-  const props = ("properties" in ds && ds.properties) || {};
-  const statusProp = props[ids.status] as { type?: string } | undefined;
-  const nextActionProp = props[ids.nextAction] as { type?: string } | undefined;
   const nowIso = new Date().toISOString();
 
   const statusFilter =
-    statusProp?.type === "status"
+    cachedStatusFieldType === "status"
       ? {
           or: [
             { property: ids.status, status: { equals: SESSION_STATUS.PENDING } },
@@ -352,7 +362,7 @@ export async function fetchDueSessions(limit = 20): Promise<DueSessionRow[]> {
 
   // Notion API has no "not_in"; exclude None / Human Review via AND of does_not_equal
   const nextActionFilter =
-    nextActionProp?.type === "status"
+    cachedNextActionFieldType === "status"
       ? {
           and: [
             { property: ids.nextAction, status: { does_not_equal: NEXT_ACTION.NONE } },
@@ -503,6 +513,8 @@ export function sessionSnapshot(session: SessionRecord): Record<string, unknown>
 export function resetSessionCache(): void {
   cachedDsId = null;
   cachedIds = null;
+  cachedStatusFieldType = "status";
+  cachedNextActionFieldType = "select";
 }
 
 export async function applyControlJsonWriteback(
@@ -577,96 +589,108 @@ export interface ReclaimResult {
 }
 
 export async function reclaimStuckSessions(now = new Date()): Promise<ReclaimResult> {
-  const client = getNotionClient();
-  const ids = await propIds();
-  const dataSourceId = await dsId();
-  const ds = await client.dataSources.retrieve({ data_source_id: dataSourceId });
-  const props = ("properties" in ds && ds.properties) || {};
-  const statusProp = props[ids.status] as { type?: string } | undefined;
-  const statusEquals = (name: string) =>
-    statusProp?.type === "status"
-      ? { property: ids.status, status: { equals: name } }
-      : { property: ids.status, select: { equals: name } };
-
-  const response = await withNotionRetry("reclaimStuckSessions", async () =>
-    client.dataSources.query({
-      data_source_id: dataSourceId,
-      filter: {
-        or: [
-          statusEquals(SESSION_STATUS.CLAIMED),
-          statusEquals(SESSION_STATUS.RUNNING),
-          statusEquals(SESSION_STATUS.ERROR),
-        ],
-      },
-      page_size: 100,
-      result_type: "page",
-    }),
-  );
-
-  // Snapshot IDs before mutations so cursor pagination cannot skip rows.
-  const pageIds = (response.results ?? [])
-    .filter((p): p is { id: string } => Boolean(p && "id" in p))
-    .map((p) => p.id);
-
   const result: ReclaimResult = { reclaimed: 0, reconciled: 0, details: [] };
-  const nowMs = now.getTime();
+  try {
+    const client = getNotionClient();
+    const ids = await propIds();
+    const dataSourceId = await dsId();
 
-  for (const pageId of pageIds) {
-    const session = await loadSession(pageIdToUrl(pageId));
+    const response = await withNotionRetry("reclaimStuckSessions", async () =>
+      client.dataSources.query({
+        data_source_id: dataSourceId,
+        filter: {
+          or: [
+            statusEqualsFilter(ids.status, SESSION_STATUS.CLAIMED),
+            statusEqualsFilter(ids.status, SESSION_STATUS.RUNNING),
+            statusEqualsFilter(ids.status, SESSION_STATUS.ERROR),
+          ],
+        },
+        page_size: 100,
+        result_type: "page",
+      }),
+    );
 
-    if (
-      session.status === SESSION_STATUS.RUNNING ||
-      session.status === SESSION_STATUS.CLAIMED
-    ) {
-      const reconciled = await reconcileSessionFromControlJson(session);
-      if (reconciled) {
-        result.reconciled++;
-        result.details.push({
-          pageId: session.pageId,
-          action: "reconciled",
-          reason: `control_json -> ${reconciled.status}`,
+    // Snapshot IDs before mutations so cursor pagination cannot skip rows.
+    const pageIds = (response.results ?? [])
+      .filter((p): p is { id: string } => Boolean(p && "id" in p))
+      .map((p) => p.id);
+
+    const nowMs = now.getTime();
+
+    for (const pageId of pageIds) {
+      try {
+        const session = await loadSession(pageIdToUrl(pageId));
+
+        if (
+          session.status === SESSION_STATUS.RUNNING ||
+          session.status === SESSION_STATUS.CLAIMED
+        ) {
+          const reconciled = await reconcileSessionFromControlJson(session);
+          if (reconciled) {
+            result.reconciled++;
+            result.details.push({
+              pageId: session.pageId,
+              action: "reconciled",
+              reason: `control_json -> ${reconciled.status}`,
+            });
+            continue;
+          }
+          if (
+            isStaleClaimOrRunning(session.status, session.lastRunAt, nowMs, STALE_CLAIM_MS)
+          ) {
+            await releaseToPendingWithError(session.pageId, "reclaimed_stale_claim");
+            result.reclaimed++;
+            result.details.push({
+              pageId: session.pageId,
+              action: "reclaimed_pending",
+              reason: "stale_claim_or_running",
+            });
+          }
+          continue;
+        }
+
+        if (session.status === SESSION_STATUS.ERROR) {
+          const reconciled = await reconcileSessionFromControlJson(session);
+          if (reconciled) {
+            result.reconciled++;
+            result.details.push({
+              pageId: session.pageId,
+              action: "reconciled",
+              reason: `error_control_json -> ${reconciled.status}`,
+            });
+            continue;
+          }
+          const err = session.lastError || "";
+          if (
+            TECHNICAL_SESSION_ERROR_RE.test(err) &&
+            session.retryCount < MAX_TECHNICAL_RETRIES
+          ) {
+            await scheduleTechnicalRetry(session.pageId, err, session.retryCount);
+            result.reclaimed++;
+            result.details.push({
+              pageId: session.pageId,
+              action: "reclaimed_pending",
+              reason: "technical_error",
+            });
+          }
+        }
+      } catch (e) {
+        logger.warn("reclaimStuckSessions: skip one session", {
+          pageId,
+          error: e instanceof Error ? e.message : String(e),
         });
-        continue;
       }
-      if (
-        isStaleClaimOrRunning(session.status, session.lastRunAt, nowMs, STALE_CLAIM_MS)
-      ) {
-        await releaseToPendingWithError(session.pageId, "reclaimed_stale_claim");
-        result.reclaimed++;
-        result.details.push({
-          pageId: session.pageId,
-          action: "reclaimed_pending",
-          reason: "stale_claim_or_running",
-        });
-      }
-      continue;
     }
-
-    if (session.status === SESSION_STATUS.ERROR) {
-      const reconciled = await reconcileSessionFromControlJson(session);
-      if (reconciled) {
-        result.reconciled++;
-        result.details.push({
-          pageId: session.pageId,
-          action: "reconciled",
-          reason: `error_control_json -> ${reconciled.status}`,
-        });
-        continue;
-      }
-      const err = session.lastError || "";
-      if (
-        TECHNICAL_SESSION_ERROR_RE.test(err) &&
-        session.retryCount < MAX_TECHNICAL_RETRIES
-      ) {
-        await scheduleTechnicalRetry(session.pageId, err, session.retryCount);
-        result.reclaimed++;
-        result.details.push({
-          pageId: session.pageId,
-          action: "reclaimed_pending",
-          reason: "technical_error",
-        });
-      }
-    }
+  } catch (e) {
+    const cause =
+      e instanceof Error && e.cause instanceof Error
+        ? `${e.message} (${e.cause.message})`
+        : e instanceof Error
+          ? e.message
+          : String(e);
+    logger.warn(
+      "reclaimStuckSessions failed (non-fatal; poll will continue): " + cause,
+    );
   }
 
   return result;
@@ -675,27 +699,29 @@ export async function reclaimStuckSessions(now = new Date()): Promise<ReclaimRes
 export type SessionStatusCounts = Record<string, number>;
 
 export async function countSessionsByStatus(): Promise<SessionStatusCounts> {
-  const client = getNotionClient();
-  const ids = await propIds();
-  const dataSourceId = await dsId();
-  const counts: SessionStatusCounts = {};
-  let cursor: string | undefined;
-  do {
-    const response = await client.dataSources.query({
-      data_source_id: dataSourceId,
-      page_size: 100,
-      start_cursor: cursor,
-      result_type: "page",
-    });
-    for (const page of response.results ?? []) {
-      if (!page || !("properties" in page)) continue;
-      const pageProps = page.properties as Record<string, unknown>;
-      const status = getSelectName(pageProps, ids.status) || "unknown";
-      counts[status] = (counts[status] || 0) + 1;
-    }
-    cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
-  } while (cursor);
-  return counts;
+  return withNotionRetry("countSessionsByStatus", async () => {
+    const client = getNotionClient();
+    const ids = await propIds();
+    const dataSourceId = await dsId();
+    const counts: SessionStatusCounts = {};
+    let cursor: string | undefined;
+    do {
+      const response = await client.dataSources.query({
+        data_source_id: dataSourceId,
+        page_size: 100,
+        start_cursor: cursor,
+        result_type: "page",
+      });
+      for (const page of response.results ?? []) {
+        if (!page || !("properties" in page)) continue;
+        const pageProps = page.properties as Record<string, unknown>;
+        const status = getSelectName(pageProps, ids.status) || "unknown";
+        counts[status] = (counts[status] || 0) + 1;
+      }
+      cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+    } while (cursor);
+    return counts;
+  });
 }
 
 export interface MissingInteractionRow {

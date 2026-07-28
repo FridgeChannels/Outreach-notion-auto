@@ -39,85 +39,70 @@ NOTION_PROFILE_DIR=/path/to/profiles/outreach-worker \
   npm run worker:export-auth -- --account=mark
 ```
 
-`.env`：
+## 同机多账号（推荐批量吞吐）
+
+**模型：`WORKER_ACCOUNTS` 有几个名字，就起几个独立进程（N 无代码上限）。**  
+每个账号：`auth/<name>.json` + 独立 `TMPDIR` / `artifacts` / `log`；**共享 `./data` 锁**，避免双跑同一 Session。
 
 ```bash
-NOTION_AUTH_DIR=./auth
-NOTION_ACCOUNT=mark
-WORKER_ID=worker-mark-1
+# 1) 每个 Notion 登录各 login 一次
+PLAYWRIGHT_HEADLESS=false npm run worker:login -- --account=mark
+PLAYWRIGHT_HEADLESS=false npm run worker:login -- --account=hayes
+
+# 2) .env
+WORKER_ACCOUNTS=mark,hayes
+OUTREACH_BATCH_LIMIT=10
+# WORKER_STAGGER_SEC=8   # 相邻进程启动间隔（秒）
+
+# 3) 一键启停（仅 outreach 队列；mailbox 建议单账号）
+npm run workers:start
+npm run workers:status
+tail -f log/worker-*.log
+npm run workers:stop
 ```
 
-### 发布到 Linux / S3
+资源提示：每多一个账号大约多一个 Chromium；机器吃紧时先减少 `WORKER_ACCOUNTS` 数量。
 
-**只上传 `auth/<account>.json`**（不要传 `profiles/`，也不要提交 GitHub）。
+### 多账号稳定性验收（摘要）
 
-```bash
-# 每次发布可顺带带上小文件；登录过期才需要重新 login
-aws s3 cp auth/mark.json s3://your-bucket/outreach/auth/mark.json
-```
+| 项 | 成功标准 |
+|----|----------|
+| T1 启停 | 列表内全部 PID alive ≥10min；tmp/artifacts/log 按账号隔离 |
+| T2 无双跑 | 同一 Session 同时只被一个 worker Claim/执行 |
+| T3 崩溃 | kill 一个进程后最多 1 条短暂 Claimed，可 reclaim/heal |
+| T4 隔离 | 一账号限流/失败，其它账号进程仍运行 |
+| T5 停止 | `workers:stop` 后无残留 worker；无活进程持锁 |
+| 总览 | 配置驱动 N 进程；联合跑 2h 或消化大批 due，无 Claimed/Error 失控堆积 |
 
-服务器：
+详细步骤见仓库计划文档 *Multi-account local workers*。
 
-```bash
-mkdir -p auth
-aws s3 cp s3://your-bucket/outreach/auth/mark.json auth/mark.json
-# NOTION_ACCOUNT=mark
-```
-
-### 多账号并行
-
-每个账号一个 JSON + 一个 worker 进程（互不抢 Chromium profile 锁）：
+## 单账号运行
 
 ```bash
-NOTION_ACCOUNT=mark  WORKER_ID=worker-mark  npm run worker &
-NOTION_ACCOUNT=hayes WORKER_ID=worker-hayes npm run worker &
-```
-
-## 运行
-
-```bash
-# 诊断到期 Session / Mailbox
+# .env: NOTION_ACCOUNT=mark  WORKER_ID=worker-mark
 npm run worker:diagnose
 
-# 单次：两个队列
-npm run worker:once
-
-# 单次：仅 Outreach / 仅 Mailbox
-npm run worker:outreach
-npm run worker:mailbox
-
-# 持续轮询（默认 5 分钟）
-npm run worker
+npm run worker:once          # 两个队列一轮
+npm run worker:outreach      # 仅 Outreach
+npm run worker:mailbox       # 仅 Mailbox
+npm run worker               # 持续轮询
 ```
 
 ## Docker / Compose
 
-```bash
-PLAYWRIGHT_HEADLESS=false npm run worker:login -- --account=default
-# 确保 auth/default.json 存在；compose 挂载 ./auth
-docker compose up -d --build
-```
+宿主机多账号优先用 `npm run workers:start`（任意 N）。
 
-多账号可复制 `outreach-worker` 服务块，改 `NOTION_ACCOUNT` / `WORKER_ID` / `container_name`。
-
-构建并后台启动：
+Compose 示例：
 
 ```bash
-docker compose up -d --build
-docker compose logs -f outreach-worker
+# 单 worker
+docker compose --profile single up -d --build
+
+# 双 worker 示例（需 auth/<acct2>.json；再加账号请复制 service，勿 scale）
+NOTION_ACCOUNT=mark NOTION_ACCOUNT_B=hayes docker compose --profile multi up -d --build
 ```
 
-常用命令：
-
-```bash
-docker compose ps
-docker compose restart outreach-worker
-docker compose down
-# 单次跑一轮（不改 compose 服务）
-docker compose run --rm outreach-worker npx tsx src/cli.ts --once
-```
-
-Compose 会挂载 `./profiles`、`./data`、`./artifacts`、`./log`，并强制 `PLAYWRIGHT_HEADLESS=true`、容器内 `NOTION_PROFILE_DIR=/app/profiles/outreach-worker`。
+共同挂载 `./data`、`./auth`；各容器独立 `TMPDIR` / `ARTIFACT_DIR` / `WORKER_ID`。
 
 ## 调度条件（对齐文档）
 
@@ -138,12 +123,10 @@ AND Next Scan At <= now
 
 ## 关键修复（相对旧版）
 
-1. **Conversation URL**：拒绝 `?t=new` 与裸 Prompt 页；接受 Notion Agent 的 `app.notion.com/p/…?t=<threadId>`（或 `/chat/` 等路由）并写回。
-2. **批量 Session 复用 AI Chat**：同一轮 poll 内多个 Session 共用一个 AI 对话窗口；成功轮次累计到随机 **15–25**（`CHAT_REUSE_MIN/MAX_ROUNDS`）后才 New chat。
-2. **多行输入**：`Shift+Enter` 换行，避免 Notion AI 把 `\n` 当发送。
-3. **Next Action 过滤**：调度排除 `None` / `Human Review`。
-4. **完成校验**：要求 `Last Control JSON` 已更新；Sleeping/Pending/Closed 等按文档校验。
-5. **双队列**：Mailbox Scan Worker 独立锁命名空间。
+1. **Conversation URL**：拒绝 `?t=new` 与裸 Prompt 页；接受 Notion Agent 的 `app.notion.com/p/…?t=<threadId>`。
+2. **批量 Session 复用 AI Chat**：成功轮次累计到随机 **15–25** 后 New chat。
+3. **懒 Claim + 锁续期/看门狗**：避免批预 Claim 孤儿；写回可按 Last Control JSON 调和。
+4. **多账号一键启停**：`WORKER_ACCOUNTS` → N 进程，共享 `./data`。
 
 ## 测试
 
@@ -161,6 +144,9 @@ src/
   notion/          Session + Mailbox repositories
   pages/           Notion AI / Login / Workspace
   flows/           processOutreach / processMailbox / poll / validators
-scripts/           login / diagnose
+scripts/           login / diagnose / start|stop|status-workers
 tests/unit/
+auth/              <account>.json（勿提交）
+data/              共享 session/execution locks
+log/               worker-<account>.log / .pid
 ```

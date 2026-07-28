@@ -28,8 +28,20 @@ export function playwrightTempRoot(): string {
   return join(process.cwd(), ".playwright-tmp");
 }
 
+/**
+ * Ensure Playwright/Chromium temp lives under `.playwright-tmp`.
+ * If TMPDIR is already set to a subdirectory (multi-account start script), keep it.
+ */
 export async function configurePlaywrightTempDir(): Promise<string> {
-  const root = playwrightTempRoot();
+  const base = playwrightTempRoot();
+  const existing = process.env.TMPDIR?.trim();
+  let root = base;
+  if (existing) {
+    const resolved = existing.startsWith("/") ? existing : join(process.cwd(), existing);
+    if (resolved === base || resolved.startsWith(`${base}/`)) {
+      root = resolved;
+    }
+  }
   await mkdir(root, { recursive: true });
   process.env.TMPDIR = root;
   process.env.TEMP = root;
