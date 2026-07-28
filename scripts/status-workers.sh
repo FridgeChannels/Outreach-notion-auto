@@ -61,3 +61,20 @@ else
     echo "(no worker pid files)"
   fi
 fi
+
+orphans="$(find_project_worker_pids | tr '\n' ' ' | sed 's/ $//')"
+if [[ -n "$orphans" ]]; then
+  echo
+  echo "ORPHAN workers (no pid file / not in WORKER_ACCOUNTS): $orphans"
+  echo "  Stop: npm run workers:stop"
+fi
+
+docker_ps=""
+if command -v docker >/dev/null 2>&1; then
+  docker_ps="$(docker ps --filter "name=outreach-notion-auto" --format '{{.Names}} ({{.Status}})' 2>/dev/null || true)"
+fi
+if [[ -n "$docker_ps" ]]; then
+  echo
+  echo "DOCKER workers:"
+  echo "$docker_ps"
+fi

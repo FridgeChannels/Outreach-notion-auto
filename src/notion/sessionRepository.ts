@@ -6,10 +6,12 @@ import {
   STALE_CLAIM_MS,
   MAX_TECHNICAL_RETRIES,
   TECHNICAL_SESSION_ERROR_RE,
+  RUNNING_VISIBILITY_TIMEOUT_MS,
+  TECHNICAL_RETRY_BACKOFF_BASE_MS,
   type SessionStatus,
   type NextAction,
 } from "../config.js";
-import { InvalidCompletionError } from "../errors.js";
+import { InvalidCompletionError, RunningVisibilityError } from "../errors.js";
 import {
   getNotionClient,
   resolveDataSourceId,
@@ -256,6 +258,73 @@ export async function markRunning(pageId: string, startedAt: Date): Promise<void
   });
 }
 
+export interface RunningVisibilityExpectation {
+  nextAction: string;
+  clientPageId: string;
+}
+
+/** Pure check — exported for unit tests. */
+export function isRunningVisibilityReady(
+  session: SessionRecord,
+  expected: RunningVisibilityExpectation,
+  startedAt: Date,
+  now = new Date(),
+): boolean {
+  if (session.status !== SESSION_STATUS.RUNNING) return false;
+  if (!session.lastRunAt) return false;
+  if (new Date(session.lastRunAt).getTime() < startedAt.getTime() - 60_000) return false;
+  if (session.clientPageId !== expected.clientPageId) return false;
+  if (!session.nextAction || session.nextAction !== expected.nextAction) return false;
+  if (
+    session.nextAction === NEXT_ACTION.NONE ||
+    session.nextAction === NEXT_ACTION.HUMAN_REVIEW
+  ) {
+    return false;
+  }
+  if (!session.nextWakeAt) return false;
+  if (new Date(session.nextWakeAt).getTime() > now.getTime()) return false;
+  return true;
+}
+
+/**
+ * After markRunning, poll until Notion API read-back shows Running + expected
+ * Next Action / Wake At so the AI Controller sees a consistent Session row.
+ */
+export async function waitForRunningVisibility(
+  sessionPageUrl: string,
+  expected: RunningVisibilityExpectation,
+  startedAt: Date,
+  timeoutMs = RUNNING_VISIBILITY_TIMEOUT_MS,
+): Promise<SessionRecord> {
+  const deadline = Date.now() + timeoutMs;
+  let pollMs = 500;
+  let last = await loadSession(sessionPageUrl);
+  while (Date.now() < deadline) {
+    if (isRunningVisibilityReady(last, expected, startedAt)) {
+      logger.info("Running visibility confirmed", {
+        pageId: last.pageId,
+        nextAction: last.nextAction,
+        nextWakeAt: last.nextWakeAt,
+      });
+      return last;
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+    pollMs = Math.min(1_000, Math.round(pollMs * 1.5));
+    last = await loadSession(sessionPageUrl);
+  }
+  throw new RunningVisibilityError(
+    `Running visibility not confirmed within ${timeoutMs}ms: status=${last.status}, nextAction=${last.nextAction}, nextWakeAt=${last.nextWakeAt}`,
+  );
+}
+
+/** Stagger retries when many workers hit the same consistency window. */
+export function technicalRetryWakeAt(retryCount: number, now = new Date()): Date {
+  const delayMs =
+    TECHNICAL_RETRY_BACKOFF_BASE_MS * (retryCount + 1) +
+    Math.floor(Math.random() * 15_000);
+  return new Date(now.getTime() + delayMs);
+}
+
 export async function saveConversationUrl(pageId: string, url: string): Promise<void> {
   const ids = await propIds();
   await getNotionClient().pages.update({
@@ -295,13 +364,13 @@ export async function scheduleTechnicalRetry(
 ): Promise<void> {
   const ids = await propIds();
   const statusPart = await statusUpdatePayload(await dsId(), ids.status, SESSION_STATUS.PENDING);
-  const wakeIso = new Date().toISOString();
+  const wakeAt = technicalRetryWakeAt(currentRetryCount);
   await getNotionClient().pages.update({
     page_id: pageId,
     properties: {
       ...statusPart,
       [ids.retryCount]: { number: currentRetryCount + 1 },
-      [ids.nextWakeAt]: { date: { start: wakeIso } },
+      [ids.nextWakeAt]: { date: { start: wakeAt.toISOString() } },
       [ids.lastError]: {
         rich_text: [{ type: "text", text: { content: errorMessage.slice(0, 2000) } }],
       },

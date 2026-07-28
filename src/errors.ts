@@ -60,6 +60,14 @@ export class InvalidCompletionError extends WorkerError {
   }
 }
 
+/** markRunning wrote to API but read-back did not show Running before submit deadline. */
+export class RunningVisibilityError extends WorkerError {
+  constructor(message: string) {
+    super(message, "before-submit", "pre-submit-technical");
+    this.name = "RunningVisibilityError";
+  }
+}
+
 export function detectExecutionPhase(error: unknown, submitted: boolean): ExecutionPhase {
   if (error instanceof WorkerError) return error.phase;
   if (submitted) return "post-submit-ambiguous";

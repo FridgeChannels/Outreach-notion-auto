@@ -1,4 +1,10 @@
-import { MAX_TECHNICAL_RETRIES, SESSION_STATUS, TECHNICAL_SESSION_ERROR_RE, type SessionStatus } from "../config.js";
+import {
+  CONTROLLER_VALIDATION_ERROR_RE,
+  MAX_TECHNICAL_RETRIES,
+  SESSION_STATUS,
+  TECHNICAL_SESSION_ERROR_RE,
+  type SessionStatus,
+} from "../config.js";
 import { SkipError, type ExecutionPhase } from "../errors.js";
 import type { SessionRecord } from "../notion/sessionRepository.js";
 import type { MailboxRecord } from "../notion/mailboxRepository.js";
@@ -63,6 +69,11 @@ export function isTechnicalWritebackError(message: string): boolean {
   return TECHNICAL_SESSION_ERROR_RE.test(message);
 }
 
+/** Controller read stale Session state or gate blocked — retry with backoff. */
+export function isControllerValidationError(message: string): boolean {
+  return CONTROLLER_VALIDATION_ERROR_RE.test(message);
+}
+
 export function decideErrorAction(
   phase: ExecutionPhase,
   retryCount: number,
@@ -75,10 +86,14 @@ export function decideErrorAction(
   // Missing composer after AI finishes / between batch jobs — keep retryable
   if (isTransientUiError(errorMessage)) return "technical-retry";
 
+  // Controller validation / gate failures after AI submit
+  if (submitted && isControllerValidationError(errorMessage)) return "technical-retry";
+
   // Partial Notion AI writeback (Status stuck Running, etc.)
   if (
     phase === "invalid-completion" ||
-    isTechnicalWritebackError(errorMessage)
+    isTechnicalWritebackError(errorMessage) ||
+    isControllerValidationError(errorMessage)
   ) {
     return "technical-retry";
   }

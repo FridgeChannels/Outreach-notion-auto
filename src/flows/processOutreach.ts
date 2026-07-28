@@ -6,6 +6,7 @@ import {
   OUTREACH_CONTROLLER_PROMPT_URL,
   MAILBOX_REPLY_SCAN_PROMPT_URL,
   NEXT_ACTION,
+  RUNNING_VISIBILITY_GRACE_MS,
   SESSION_STATUS,
   SESSION_WRITEBACK_TIMEOUT_MS,
   WORKER_ID,
@@ -30,6 +31,7 @@ import {
   sessionSnapshot,
   releaseClaimToPending,
   reconcileSessionFromControlJson,
+  waitForRunningVisibility,
 } from "../notion/sessionRepository.js";
 import { parsePageUrl } from "../notion/helpers.js";
 import {
@@ -169,7 +171,18 @@ export async function processOutreachJob(
       throw new SkipError("Lock lost before submit");
     }
     validateSessionBeforeSubmit(latest, session.clientPageId);
+    if (!latest.nextAction) {
+      throw new SkipError("Next Action is empty before submit");
+    }
     await markRunning(latest.pageId, startedAt);
+    await waitForRunningVisibility(
+      job.sessionPageUrl,
+      { nextAction: latest.nextAction, clientPageId: latest.clientPageId! },
+      startedAt,
+    );
+    if (RUNNING_VISIBILITY_GRACE_MS > 0) {
+      await new Promise((r) => setTimeout(r, RUNNING_VISIBILITY_GRACE_MS));
+    }
 
     heartbeat = startLockHeartbeat(
       "session",

@@ -9,6 +9,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+let shuttingDown = false;
+
+function installShutdownHandlers(): void {
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info(`Received ${signal}; exiting worker loop`);
+    process.exit(0);
+  };
+  process.on("SIGTERM", onSignal);
+  process.on("SIGINT", onSignal);
+}
+
 function parseQueues(args: string[]): Array<"outreach" | "mailbox"> {
   const flag = args.find((a) => a.startsWith("--queue="));
   if (!flag) return ["outreach", "mailbox"];
@@ -59,6 +72,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  installShutdownHandlers();
+
   if (args.includes("--once")) {
     logger.info(`Worker ${WORKER_ID} once`, { queues });
     await pollOnce(queues);
@@ -67,11 +82,13 @@ async function main(): Promise<void> {
 
   logger.info(`Worker ${WORKER_ID} poll loop`, { queues });
   for (;;) {
+    if (shuttingDown) break;
     try {
       await pollOnce(queues);
     } catch (e) {
       logger.error("Poll cycle failed", e);
     }
+    if (shuttingDown) break;
     await sleep(SESSION_POLL_INTERVAL_MS);
   }
 }

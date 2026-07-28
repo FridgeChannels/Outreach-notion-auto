@@ -131,6 +131,18 @@ describe("decideErrorAction", () => {
       "mark-error",
     );
   });
+
+  it("retries Controller validation errors after submit", () => {
+    assert.equal(
+      decideErrorAction(
+        "post-submit-ambiguous",
+        0,
+        true,
+        "session_status_not_running: expected Status=Running, got Pending; no external action executed.",
+      ),
+      "technical-retry",
+    );
+  });
 });
 
 describe("isRealConversationUrl", () => {
