@@ -159,4 +159,19 @@ export async function statusUpdatePayload(
     : { [statusPropId]: { select: { name: status } } };
 }
 
+/** Next Action (and similar) may be status or select depending on DB schema. */
+export async function namedOptionUpdatePayload(
+  dataSourceId: string,
+  propId: string,
+  name: string,
+): Promise<Record<string, unknown>> {
+  const client = getNotionClient();
+  const ds = await client.dataSources.retrieve({ data_source_id: dataSourceId });
+  const props = ("properties" in ds && ds.properties) || {};
+  const prop = props[propId] as { type?: string } | undefined;
+  return prop?.type === "status"
+    ? { [propId]: { status: { name } } }
+    : { [propId]: { select: { name } } };
+}
+
 export { isFullPage, extractDatabaseId };

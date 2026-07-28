@@ -139,6 +139,7 @@ AND Next Scan At <= now
 ## 关键修复（相对旧版）
 
 1. **Conversation URL**：拒绝 `?t=new` 与裸 Prompt 页；接受 Notion Agent 的 `app.notion.com/p/…?t=<threadId>`（或 `/chat/` 等路由）并写回。
+2. **批量 Session 复用 AI Chat**：同一轮 poll 内多个 Session 共用一个 AI 对话窗口；成功轮次累计到随机 **15–25**（`CHAT_REUSE_MIN/MAX_ROUNDS`）后才 New chat。
 2. **多行输入**：`Shift+Enter` 换行，避免 Notion AI 把 `\n` 当发送。
 3. **Next Action 过滤**：调度排除 `None` / `Human Review`。
 4. **完成校验**：要求 `Last Control JSON` 已更新；Sleeping/Pending/Closed 等按文档校验。

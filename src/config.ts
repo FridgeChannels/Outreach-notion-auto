@@ -30,7 +30,15 @@ export const SESSION_POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS) || 
 export const CHAT_RUN_TIMEOUT_MS = 10 * 60 * 1000;
 /** After chat UI looks idle, keep polling Session until it leaves Running/Claimed. */
 export const SESSION_WRITEBACK_TIMEOUT_MS =
-  Number(process.env.SESSION_WRITEBACK_TIMEOUT_MS) || 3 * 60 * 1000;
+  Number(process.env.SESSION_WRITEBACK_TIMEOUT_MS) || 8 * 60 * 1000;
+/** Claimed/Running older than this (or never started) are reclaimed to Pending. */
+export const STALE_CLAIM_MS = Number(process.env.STALE_CLAIM_MS) || 30 * 60 * 1000;
+/**
+ * Worker/technical Last Error messages that should be retried (not permanent Error).
+ * Also used by diagnose --heal and poll reclaim watchdog.
+ */
+export const TECHNICAL_SESSION_ERROR_RE =
+  /Session still in (Running|Claimed)|Last Run At was not updated|Last Run At is empty|Last Control JSON was not updated|Ambiguous execution|reclaimed_stale_claim|Visible Notion AI chat input not found/i;
 export const UI_ACTION_TIMEOUT_MS = 30 * 1000;
 /** Wait for Notion AI corner / panel (servers are often slower than local). */
 export const AI_PANEL_TIMEOUT_MS =
@@ -38,6 +46,13 @@ export const AI_PANEL_TIMEOUT_MS =
 export const MAX_TECHNICAL_RETRIES = 2;
 export const LOCK_TTL_MS = Number(process.env.LOCK_TTL_MS) || 15 * 60 * 1000;
 export const LOCK_HEARTBEAT_INTERVAL_MS = 60 * 1000;
+
+/**
+ * Within one poll batch, reuse the same Notion AI chat for this many successful
+ * rounds, then open a New chat. Randomized per chat in [min, max].
+ */
+export const CHAT_REUSE_MIN_ROUNDS = Number(process.env.CHAT_REUSE_MIN_ROUNDS) || 15;
+export const CHAT_REUSE_MAX_ROUNDS = Number(process.env.CHAT_REUSE_MAX_ROUNDS) || 25;
 
 export const NOTION_API_KEY = process.env.NOTION_API_KEY?.trim() || "";
 export const WORKER_ID = process.env.WORKER_ID?.trim() || `worker-${process.pid}`;
@@ -57,6 +72,7 @@ export const PROP = {
   RETRY_COUNT: "Retry Count",
   NEXT_ACTION: "Next Action",
   LATEST_MEETING: "Latest Meeting",
+  LATEST_INTERACTION: "Latest Interaction",
   WAKE_PAYLOAD_JSON: "Wake Payload JSON",
   WAKE_REASON: "Wake Reason",
   DNC: "Email Do Not Contact",

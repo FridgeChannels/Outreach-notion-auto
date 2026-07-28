@@ -273,3 +273,27 @@ export function startLockHeartbeat(
   }, intervalMs);
   return { stop: () => clearInterval(timer) };
 }
+
+/** Remove expired session/mailbox lock files (diagnose / heal). */
+export async function clearExpiredLocks(
+  kind: "session" | "mailbox" = "session",
+): Promise<number> {
+  const { readdir } = await import("node:fs/promises");
+  const dir = lockDir(kind);
+  if (!existsSync(dir)) return 0;
+  let n = 0;
+  for (const name of await readdir(dir)) {
+    if (!name.endsWith(".json")) continue;
+    const path = join(dir, name);
+    const record = await readLock(path);
+    if (!record || isExpired(record)) {
+      try {
+        await unlink(path);
+        n++;
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return n;
+}

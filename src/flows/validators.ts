@@ -1,4 +1,4 @@
-import { MAX_TECHNICAL_RETRIES, SESSION_STATUS, type SessionStatus } from "../config.js";
+import { MAX_TECHNICAL_RETRIES, SESSION_STATUS, TECHNICAL_SESSION_ERROR_RE, type SessionStatus } from "../config.js";
 import { SkipError, type ExecutionPhase } from "../errors.js";
 import type { SessionRecord } from "../notion/sessionRepository.js";
 import type { MailboxRecord } from "../notion/mailboxRepository.js";
@@ -51,15 +51,40 @@ export function isSchedulerEligible(
 
 export type ErrorAction = "skip" | "technical-retry" | "mark-error";
 
+/** Flaky Notion AI UI — never permanent Error; allow Pending retry. */
+export function isTransientUiError(message: string): boolean {
+  return /Visible Notion AI chat input not found|AI panel not found|chat input not visible|composer|Something went wrong|dismiss the error|rate limit/i.test(
+    message,
+  );
+}
+
+/** Incomplete writeback / InvalidCompletion — retry unless retries exhausted. */
+export function isTechnicalWritebackError(message: string): boolean {
+  return TECHNICAL_SESSION_ERROR_RE.test(message);
+}
+
 export function decideErrorAction(
   phase: ExecutionPhase,
   retryCount: number,
   submitted: boolean,
+  errorMessage = "",
 ): ErrorAction {
   if (phase === "skip") return "skip";
-  if (phase === "before-submit" && retryCount < MAX_TECHNICAL_RETRIES && !submitted) {
+  if (retryCount >= MAX_TECHNICAL_RETRIES) return "mark-error";
+
+  // Missing composer after AI finishes / between batch jobs — keep retryable
+  if (isTransientUiError(errorMessage)) return "technical-retry";
+
+  // Partial Notion AI writeback (Status stuck Running, etc.)
+  if (
+    phase === "invalid-completion" ||
+    isTechnicalWritebackError(errorMessage)
+  ) {
     return "technical-retry";
   }
+
+  if (phase === "before-submit" && !submitted) return "technical-retry";
+  if (phase === "conversation" && !submitted) return "technical-retry";
   return "mark-error";
 }
 

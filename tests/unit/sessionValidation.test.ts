@@ -23,6 +23,7 @@ function base(overrides: Partial<SessionRecord> = {}): SessionRecord {
     wakePayloadEventId: null,
     retryCount: 0,
     clientDnc: false,
+    hasLatestInteraction: true,
     ...overrides,
   };
 }

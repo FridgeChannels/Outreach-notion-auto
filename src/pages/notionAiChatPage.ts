@@ -142,7 +142,8 @@ export async function composerHasExpectedPages(page: Page, message: string): Pro
   if (!ids.length) return true;
   const input = await resolveChatInput(page);
   return input.evaluate((el, expectedIds: string[]) => {
-    const blob = `${el.innerText || ""}\n${el.innerHTML || ""}`.toLowerCase();
+    const node = el as HTMLElement;
+    const blob = `${node.innerText || ""}\n${node.innerHTML || ""}`.toLowerCase();
     let hit = 0;
     for (const id of expectedIds) {
       const dashed = `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`;
@@ -150,7 +151,7 @@ export async function composerHasExpectedPages(page: Page, message: string): Pro
         hit += 1;
         continue;
       }
-      const anchors = Array.from(el.querySelectorAll("a[href]")) as HTMLAnchorElement[];
+      const anchors = Array.from(node.querySelectorAll("a[href]")) as HTMLAnchorElement[];
       const ok = anchors.some((a) => {
         const href = (a.getAttribute("href") || "").toLowerCase();
         return href.includes(id) || href.includes(dashed);
@@ -410,6 +411,40 @@ export class NotionAiChatPage {
       return url;
     }
     return null;
+  }
+
+  /** New chat in the current AI panel (batch reuse rotate) — avoid full page re-nav when possible. */
+  async rotateToNewChat(page: Page, entryUrl: string): Promise<string | null> {
+    this.attachUrlCapture(page);
+    this.resetSubmittedFlag();
+    await this.dismissDialogs(page).catch(() => undefined);
+    if (!(await this.isChatInputReady(page))) {
+      const entry = toChatEntryUrl(entryUrl);
+      if (!samePageUrl(page.url(), entry)) {
+        await page.goto(entry, { waitUntil: "domcontentloaded", timeout: 90_000 });
+      }
+      await this.openAiPanel(page).catch(() => undefined);
+    }
+    await this.clickNewChat(page);
+    await this.dismissDialogs(page).catch(() => undefined);
+    await sleep(NEW_CHAT_SETTLE_MS);
+    await this.waitForChatReady(page);
+    const url = await this.captureConversationUrl(page, 2_000);
+    if (url) logger.info("Rotated to new conversation", { url });
+    return url;
+  }
+
+  async hasReadyComposer(page: Page): Promise<boolean> {
+    return this.isChatInputReady(page);
+  }
+
+  /** Stay on current chat; reopen panel if needed. */
+  async ensureComposerReady(page: Page): Promise<void> {
+    await this.dismissDialogs(page).catch(() => undefined);
+    if (!(await this.isChatInputReady(page))) {
+      await this.openAiPanel(page).catch(() => undefined);
+    }
+    await this.waitForChatReady(page);
   }
 
   /**

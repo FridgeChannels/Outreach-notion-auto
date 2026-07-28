@@ -250,12 +250,14 @@ export async function processMailboxJob(
       return { ok: false, skipped: true, error: error.message };
     }
 
-    const action = decideErrorAction(phase, 0, chatPage.wasSubmitted());
+    const errMsg = error instanceof Error ? error.message : String(error);
+    const action = decideErrorAction(phase, 0, chatPage.wasSubmitted(), errMsg);
     if (action === "technical-retry" && refreshed.status === MAILBOX_STATUS.SCANNING) {
       await releaseScanningToActive(mailbox.pageId);
       runLog.status_after = MAILBOX_STATUS.ACTIVE;
       logger.run(runLog);
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      logger.warn(`Mailbox technical retry (Status=Active): ${errMsg}`);
+      return { ok: false, error: errMsg };
     }
 
     await markMailboxError(

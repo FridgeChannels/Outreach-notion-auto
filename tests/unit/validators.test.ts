@@ -30,6 +30,7 @@ function base(overrides: Partial<SessionRecord> = {}): SessionRecord {
     wakePayloadEventId: null,
     retryCount: 0,
     clientDnc: false,
+    hasLatestInteraction: false,
     ...overrides,
   };
 }
@@ -78,6 +79,57 @@ describe("decideErrorAction", () => {
     assert.equal(decideErrorAction("before-submit", 0, false), "technical-retry");
     assert.equal(decideErrorAction("before-submit", 2, false), "mark-error");
     assert.equal(decideErrorAction("post-submit-ambiguous", 0, true), "mark-error");
+  });
+
+  it("retries chat-input-not-found instead of permanent Error", () => {
+    assert.equal(
+      decideErrorAction(
+        "conversation",
+        0,
+        true,
+        "Visible Notion AI chat input not found",
+      ),
+      "technical-retry",
+    );
+    assert.equal(
+      decideErrorAction(
+        "conversation",
+        2,
+        true,
+        "Visible Notion AI chat input not found",
+      ),
+      "mark-error",
+    );
+  });
+
+  it("retries InvalidCompletion / still-Running writeback failures", () => {
+    assert.equal(
+      decideErrorAction(
+        "invalid-completion",
+        0,
+        true,
+        "Session still in Running after AI completion",
+      ),
+      "technical-retry",
+    );
+    assert.equal(
+      decideErrorAction(
+        "post-submit-ambiguous",
+        0,
+        true,
+        "Last Run At was not updated after this run",
+      ),
+      "technical-retry",
+    );
+    assert.equal(
+      decideErrorAction(
+        "invalid-completion",
+        2,
+        true,
+        "Session still in Running after AI completion",
+      ),
+      "mark-error",
+    );
   });
 });
 

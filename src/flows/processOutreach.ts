@@ -3,22 +3,21 @@ import {
   buildOutreachMessage,
   CHAT_RUN_TIMEOUT_MS,
   LOCK_HEARTBEAT_INTERVAL_MS,
-  MAX_TECHNICAL_RETRIES,
-  NOTION_AI_MODEL_DEFAULT,
   OUTREACH_CONTROLLER_PROMPT_URL,
   MAILBOX_REPLY_SCAN_PROMPT_URL,
+  NEXT_ACTION,
   SESSION_STATUS,
   SESSION_WRITEBACK_TIMEOUT_MS,
   WORKER_ID,
 } from "../config.js";
-import { openPersistentBrowserContext, closeBrowserContext } from "../browser.js";
-import { detectExecutionPhase, errorCategoryFromPhase, SkipError } from "../errors.js";
+import { detectExecutionPhase, errorCategoryFromPhase, SkipError, InvalidCompletionError } from "../errors.js";
 import {
   decideErrorAction,
   isRealConversationUrl,
   validateSessionBeforeBrowser,
   validateSessionBeforeSubmit,
 } from "./validators.js";
+import { type OutreachBatchChat } from "./chatReuse.js";
 import {
   loadSession,
   markRunning,
@@ -26,10 +25,11 @@ import {
   clearWorkerTechnicalErrorIfSafe,
   scheduleTechnicalRetry,
   markAmbiguousOrError,
-  releaseClaimToPending,
   waitForSessionWriteback,
   validateSuccessfulSessionUpdate,
   sessionSnapshot,
+  releaseClaimToPending,
+  reconcileSessionFromControlJson,
 } from "../notion/sessionRepository.js";
 import { parsePageUrl } from "../notion/helpers.js";
 import {
@@ -43,8 +43,6 @@ import {
   clearExecutionLock,
 } from "../locks.js";
 import { NotionAiChatPage } from "../pages/notionAiChatPage.js";
-import { NotionLoginPage } from "../pages/notionLoginPage.js";
-import { NotionWorkspacePage } from "../pages/notionWorkspacePage.js";
 import {
   makeRunId,
   saveScreenshot,
@@ -101,9 +99,12 @@ async function persistVerifiedConversationUrl(
   return conversationUrl;
 }
 
+/**
+ * Process one Outreach Session using the batch-shared AI chat (reuse until rotate).
+ */
 export async function processOutreachJob(
   job: OutreachJob,
-  sharedContext?: BrowserContext,
+  batch: OutreachBatchChat,
 ): Promise<ProcessResult> {
   const startedAt = new Date();
   const lockPageId = parsePageUrl(job.sessionPageUrl);
@@ -127,10 +128,8 @@ export async function processOutreachJob(
   );
   let executionToken: string | null = null;
 
-  let context: BrowserContext | null = null;
+  const chatPage = batch.chatPage;
   let page: Page | null = null;
-  const ownsContext = !sharedContext;
-  const chatPage = new NotionAiChatPage();
   let heartbeat: { stop: () => void } | null = null;
   let tracingSaved = false;
 
@@ -160,44 +159,10 @@ export async function processOutreachJob(
       throw new SkipError(`Duplicate execution blocked: ${executionKey}`);
     }
 
-    context = sharedContext ?? (await openPersistentBrowserContext());
-    if (ownsContext) await startTracing(context);
-    page = await context.newPage();
-
-    await new NotionWorkspacePage().smokeTestOutreach(page, session.clientPageUrl!);
-    await new NotionLoginPage().assertLoggedIn(page);
-    logger.info("Smoke ok; creating/opening AI chat");
-
-    let conversationUrl = session.conversationUrl;
-    if (
-      conversationUrl &&
-      !isRealConversationUrl(conversationUrl, [
-        OUTREACH_CONTROLLER_PROMPT_URL,
-        MAILBOX_REPLY_SCAN_PROMPT_URL,
-      ])
-    ) {
-      logger.warn(`Ignoring stub Conversation URL, will create a new chat: ${conversationUrl}`);
-      await saveConversationUrl(session.pageId, "");
-      conversationUrl = null;
-      runLog.conversation_url = null;
-    }
-
-    if (conversationUrl) {
-      await chatPage.openConversation(page, conversationUrl);
-    } else {
-      conversationUrl = await chatPage.createConversation(page, OUTREACH_CONTROLLER_PROMPT_URL);
-      await chatPage.ensureModel(page, session.model || NOTION_AI_MODEL_DEFAULT);
-      if (conversationUrl) {
-        conversationUrl = await persistVerifiedConversationUrl(
-          context,
-          chatPage,
-          session.pageId,
-          conversationUrl,
-        );
-        session = { ...session, conversationUrl };
-        runLog.conversation_url = conversationUrl;
-      }
-    }
+    const prepared = await batch.prepareForJob(session.model);
+    page = prepared.page;
+    let conversationUrl = prepared.conversationUrl;
+    runLog.conversation_url = conversationUrl;
 
     const latest = await loadSession(job.sessionPageUrl);
     if (!(await validateLock("session", session.pageId, job.lockToken))) {
@@ -216,29 +181,40 @@ export async function processOutreachJob(
     const message = buildOutreachMessage(latest.clientPageUrl!);
     await chatPage.submitAndWait(page, message, CHAT_RUN_TIMEOUT_MS);
     runLog.submitted_at = new Date().toISOString();
-    // Do NOT markExecutionSubmitted yet — only after Session writeback succeeds.
-    // Otherwise a Notion AI crash after click would permanently block this wake event.
 
-    if (!conversationUrl) {
+    // Capture / refresh durable Conversation URL after submit when missing
+    if (!conversationUrl || !isRealConversationUrl(conversationUrl, [
+      OUTREACH_CONTROLLER_PROMPT_URL,
+      MAILBOX_REPLY_SCAN_PROMPT_URL,
+    ])) {
       try {
-        // Short capture only — do not block 30s after a successful chat turn
         const captured = await chatPage.waitForConversationUrl(page, page.url(), 8_000);
-        conversationUrl = await persistVerifiedConversationUrl(
-          context,
-          chatPage,
-          session.pageId,
-          captured,
-        );
+        if (batch.lastPrepareRotated) {
+          conversationUrl = await persistVerifiedConversationUrl(
+            batch.context,
+            chatPage,
+            session.pageId,
+            captured,
+          );
+        } else {
+          await saveConversationUrl(session.pageId, captured);
+          conversationUrl = captured;
+        }
         runLog.conversation_url = conversationUrl;
       } catch (e) {
         const fallback = await chatPage.captureConversationUrl(page, 5_000);
         if (fallback) {
-          conversationUrl = await persistVerifiedConversationUrl(
-            context,
-            chatPage,
-            session.pageId,
-            fallback,
-          );
+          if (batch.lastPrepareRotated) {
+            conversationUrl = await persistVerifiedConversationUrl(
+              batch.context,
+              chatPage,
+              session.pageId,
+              fallback,
+            );
+          } else {
+            await saveConversationUrl(session.pageId, fallback);
+            conversationUrl = fallback;
+          }
           runLog.conversation_url = conversationUrl;
         } else {
           logger.warn(
@@ -246,17 +222,45 @@ export async function processOutreachJob(
           );
         }
       }
+    } else {
+      // Same shared chat — stamp URL onto this Session without re-verify every time
+      await saveConversationUrl(session.pageId, conversationUrl);
+      runLog.conversation_url = conversationUrl;
     }
 
     logger.info("Waiting for Session writeback (Status leaving Running/Claimed)…");
-    const updated = await waitForSessionWriteback(
+    let updated = await waitForSessionWriteback(
       job.sessionPageUrl,
       startedAt,
       SESSION_WRITEBACK_TIMEOUT_MS,
     );
-    validateSuccessfulSessionUpdate(updated, startedAt);
-    // Only now: this wake+action completed successfully — block duplicate resubmit
+    try {
+      validateSuccessfulSessionUpdate(updated, startedAt);
+    } catch (validationErr) {
+      if (!(validationErr instanceof InvalidCompletionError)) throw validationErr;
+      const reconciled = await reconcileSessionFromControlJson(updated);
+      if (!reconciled) throw validationErr;
+      updated = reconciled;
+      validateSuccessfulSessionUpdate(updated, startedAt);
+      logger.info("Session writeback reconciled from Last Control JSON", {
+        status: updated.status,
+        nextAction: updated.nextAction,
+      });
+    }
+
+    if (
+      updated.nextAction === NEXT_ACTION.EXECUTE_EMAIL &&
+      !updated.hasLatestInteraction
+    ) {
+      logger.warn(
+        "Execute Email without Latest Interaction — Prompt may have skipped Interaction create",
+        { sessionId: session.sessionId, pageId: session.pageId },
+      );
+    }
+
     await markExecutionSubmitted(executionKey, executionToken, conversationUrl);
+    batch.recordSuccessfulRound(conversationUrl);
+
     const cleared = await clearWorkerTechnicalErrorIfSafe(updated);
     if (!cleared) {
       logger.info(
@@ -275,27 +279,33 @@ export async function processOutreachJob(
     runLog.completed_at = new Date().toISOString();
 
     await saveScreenshot(page, artifactCtx, "failure");
-    if (context && !tracingSaved) {
-      await stopTracing(context, artifactCtx);
+    if (!tracingSaved) {
+      await stopTracing(batch.context, artifactCtx);
       tracingSaved = true;
     }
-
-    const refreshed = await loadSession(job.sessionPageUrl).catch(() => session);
     await saveSnapshot(artifactCtx, {
-      ...sessionSnapshot(refreshed),
+      label: "failure",
+      error: error instanceof Error ? error.message : String(error),
       phase,
-      submitted: chatPage.wasSubmitted(),
-      page_url: page?.url() ?? null,
-      execution_key: executionKey,
-      last_ai_summary: page ? await chatPage.getLastAiMessageSummary(page).catch(() => "") : "",
+      session: sessionSnapshot(session),
+      batch: {
+        roundsUsed: batch.roundsUsed,
+        rotateAt: batch.rotateAt,
+        conversationUrl: batch.conversationUrl,
+      },
     });
 
     if (error instanceof SkipError) {
-      if (refreshed.status === SESSION_STATUS.CLAIMED) {
-        await releaseClaimToPending(session.pageId);
-        runLog.status_after = SESSION_STATUS.PENDING;
-      } else {
-        runLog.status_after = refreshed.status;
+      runLog.status_after = statusBefore;
+      // Batch pre-claims leave Status=Claimed; if the lock expired while waiting
+      // in queue, put back to Pending so the next poll can pick it up.
+      if (/lock/i.test(error.message)) {
+        try {
+          await releaseClaimToPending(session.pageId);
+          runLog.status_after = SESSION_STATUS.PENDING;
+        } catch (releaseErr) {
+          logger.warn("Failed to release claim after lock skip", releaseErr);
+        }
       }
       logger.run(runLog);
       logger.info(`Skipped: ${error.message}`);
@@ -303,20 +313,18 @@ export async function processOutreachJob(
     }
 
     const errMsg = error instanceof Error ? error.message : String(error);
-    // Notion AI "Something went wrong" after UI submit: no Session writeback yet —
-    // treat as technical retry so the next poll can resubmit (execution lock not marked submitted).
-    const transientNotionAi =
-      /Something went wrong|dismiss the error|rate limit/i.test(errMsg) &&
-      session.retryCount < MAX_TECHNICAL_RETRIES;
-    const action = transientNotionAi
-      ? "technical-retry"
-      : decideErrorAction(phase, session.retryCount, chatPage.wasSubmitted());
+    const action = decideErrorAction(
+      phase,
+      session.retryCount,
+      chatPage.wasSubmitted(),
+      errMsg,
+    );
     if (action === "technical-retry") {
-      // Allow the same wake+action to run again after a failed attempt
       await clearExecutionLock(executionKey);
       await scheduleTechnicalRetry(session.pageId, errMsg, session.retryCount);
       runLog.status_after = SESSION_STATUS.PENDING;
       logger.run(runLog);
+      logger.warn(`Technical retry (Status=Pending): ${errMsg}`);
       return { ok: false, error: errMsg };
     }
 
@@ -332,22 +340,11 @@ export async function processOutreachJob(
   } finally {
     heartbeat?.stop();
     if (executionToken) {
-      // Keep lock if submitted so retries cannot recreate chat / resubmit
       await releaseExecutionLock(executionKey, executionToken, {
         onlyIfNotSubmitted: true,
       });
     }
     await releaseLock("session", session.pageId, job.lockToken);
-    if (page) {
-      await page.close().catch(() => undefined);
-    }
-    if (context && ownsContext) {
-      try {
-        if (!tracingSaved) await stopTracing(context, artifactCtx);
-        await closeBrowserContext(context);
-      } catch {
-        // ignore
-      }
-    }
+    // Keep batch.page open for the next Session in this poll cycle
   }
 }
