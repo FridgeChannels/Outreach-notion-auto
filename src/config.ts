@@ -43,7 +43,7 @@ export const RUNNING_VISIBILITY_TIMEOUT_MS =
   Number(process.env.RUNNING_VISIBILITY_TIMEOUT_MS) || 30_000;
 /** Extra pause after Running is confirmed (API read replica lag for Controller). */
 export const RUNNING_VISIBILITY_GRACE_MS =
-  Number(process.env.RUNNING_VISIBILITY_GRACE_MS) || 1_000;
+  Number(process.env.RUNNING_VISIBILITY_GRACE_MS) || 3_000;
 /** Base backoff per retry when scheduleTechnicalRetry runs (× retryCount+1 + jitter). */
 export const TECHNICAL_RETRY_BACKOFF_BASE_MS =
   Number(process.env.TECHNICAL_RETRY_BACKOFF_BASE_MS) || 30_000;
@@ -51,7 +51,7 @@ export const TECHNICAL_RETRY_BACKOFF_BASE_MS =
  * Notion AI Controller validation / gate failures — transient under multi-worker load.
  */
 export const CONTROLLER_VALIDATION_ERROR_RE =
-  /Controller validation failed|session_status_not_running|expected (exactly one|unique) (unarchived )?Session|Execute Email gate blocked|Route None requires Status already|No external action executed/i;
+  /Controller (validation|precondition) failed|session_status_not_running|expected.{0,120}Status=Running|Execute Email gate blocked|Route None requires Status already|No external action executed/i;
 /**
  * Worker/technical Last Error messages that should be retried (not permanent Error).
  * Also used by diagnose --heal and poll reclaim watchdog.

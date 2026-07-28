@@ -102,6 +102,12 @@ describe("isControllerValidationError", () => {
       true,
     );
     assert.equal(
+      isControllerValidationError(
+        "Controller precondition failed: expected the unique session for the input client to have Status=Running, but found Status=Pending; no external action executed.",
+      ),
+      true,
+    );
+    assert.equal(
       isControllerValidationError("Execute Email gate blocked: Live mode cannot run before Next Wake At."),
       true,
     );

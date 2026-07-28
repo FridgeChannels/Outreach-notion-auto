@@ -167,6 +167,15 @@ export async function validateLock(
   return record.token === token;
 }
 
+/** True when a non-expired lock file exists (any worker). Used by reclaim watchdog. */
+export async function isLockHeld(
+  kind: "session" | "mailbox",
+  id: string,
+): Promise<boolean> {
+  const record = await readLock(lockFilePath(kind, id));
+  return Boolean(record && !isExpired(record));
+}
+
 export async function renewLock(
   kind: "session" | "mailbox",
   id: string,

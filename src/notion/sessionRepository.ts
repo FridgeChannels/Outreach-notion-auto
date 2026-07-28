@@ -35,6 +35,7 @@ import {
   parseSessionControlJson,
   type ParsedControlJson,
 } from "./controlJson.js";
+import { isLockHeld } from "../locks.js";
 import { logger } from "../logging.js";
 
 export interface SessionRecord {
@@ -694,6 +695,18 @@ export async function reclaimStuckSessions(now = new Date()): Promise<ReclaimRes
           session.status === SESSION_STATUS.RUNNING ||
           session.status === SESSION_STATUS.CLAIMED
         ) {
+          // Never reclaim a Session another worker is actively holding —
+          // Claimed with empty Last Run At looks "stale" until markRunning,
+          // and reclaiming it to Pending is what Controller then reads.
+          if (await isLockHeld("session", session.pageId)) {
+            result.details.push({
+              pageId: session.pageId,
+              action: "skipped_locked",
+              reason: "active_session_lock",
+            });
+            continue;
+          }
+
           const reconciled = await reconcileSessionFromControlJson(session);
           if (reconciled) {
             result.reconciled++;

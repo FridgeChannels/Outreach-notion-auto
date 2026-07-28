@@ -4,6 +4,7 @@ import {
   acquireLock,
   releaseLock,
   validateLock,
+  isLockHeld,
   acquireExecutionLock,
   markExecutionSubmitted,
   releaseExecutionLock,
@@ -18,7 +19,9 @@ describe("locks", () => {
     assert.ok(t1);
     assert.equal(t2, null);
     assert.equal(await validateLock("session", id, t1!), true);
+    assert.equal(await isLockHeld("session", id), true);
     await releaseLock("session", id, t1!);
+    assert.equal(await isLockHeld("session", id), false);
   });
 
   it("mailbox lock is separate namespace", async () => {

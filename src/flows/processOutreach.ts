@@ -11,12 +11,11 @@ import {
   SESSION_WRITEBACK_TIMEOUT_MS,
   WORKER_ID,
 } from "../config.js";
-import { detectExecutionPhase, errorCategoryFromPhase, SkipError, InvalidCompletionError } from "../errors.js";
+import { detectExecutionPhase, errorCategoryFromPhase, SkipError, InvalidCompletionError, RunningVisibilityError } from "../errors.js";
 import {
   decideErrorAction,
   isRealConversationUrl,
   validateSessionBeforeBrowser,
-  validateSessionBeforeSubmit,
 } from "./validators.js";
 import { type OutreachBatchChat } from "./chatReuse.js";
 import {
@@ -161,6 +160,25 @@ export async function processOutreachJob(
       throw new SkipError(`Duplicate execution blocked: ${executionKey}`);
     }
 
+    // Mark Running ASAP (before browser prep). Claimed+empty Last Run At looks
+    // "stale" to other workers' reclaim watchdog; setting Last Run At early
+    // plus lock-aware reclaim prevents Status flipping back to Pending.
+    if (!session.nextAction) {
+      throw new SkipError("Next Action is empty before submit");
+    }
+    await markRunning(session.pageId, startedAt);
+    heartbeat = startLockHeartbeat(
+      "session",
+      session.pageId,
+      job.lockToken,
+      LOCK_HEARTBEAT_INTERVAL_MS,
+    );
+    await waitForRunningVisibility(
+      job.sessionPageUrl,
+      { nextAction: session.nextAction, clientPageId: session.clientPageId! },
+      startedAt,
+    );
+
     const prepared = await batch.prepareForJob(session.model);
     page = prepared.page;
     let conversationUrl = prepared.conversationUrl;
@@ -170,26 +188,25 @@ export async function processOutreachJob(
     if (!(await validateLock("session", session.pageId, job.lockToken))) {
       throw new SkipError("Lock lost before submit");
     }
-    validateSessionBeforeSubmit(latest, session.clientPageId);
-    if (!latest.nextAction) {
-      throw new SkipError("Next Action is empty before submit");
+    if (latest.clientPageId !== session.clientPageId) {
+      throw new SkipError("Client relation changed before submit");
     }
-    await markRunning(latest.pageId, startedAt);
-    await waitForRunningVisibility(
-      job.sessionPageUrl,
-      { nextAction: latest.nextAction, clientPageId: latest.clientPageId! },
-      startedAt,
-    );
+    if (latest.clientDnc) throw new SkipError("DNC enabled before submit");
+    if (latest.status !== SESSION_STATUS.RUNNING) {
+      throw new RunningVisibilityError(
+        `Status flipped to ${latest.status} before submit (expected Running)`,
+      );
+    }
     if (RUNNING_VISIBILITY_GRACE_MS > 0) {
       await new Promise((r) => setTimeout(r, RUNNING_VISIBILITY_GRACE_MS));
     }
-
-    heartbeat = startLockHeartbeat(
-      "session",
-      session.pageId,
-      job.lockToken,
-      LOCK_HEARTBEAT_INTERVAL_MS,
-    );
+    // Final re-read right before AI send — catch late reclaim/consistency flip.
+    const ready = await loadSession(job.sessionPageUrl);
+    if (ready.status !== SESSION_STATUS.RUNNING) {
+      throw new RunningVisibilityError(
+        `Status flipped to ${ready.status} at submit gate (expected Running)`,
+      );
+    }
 
     const message = buildOutreachMessage(latest.clientPageUrl!);
     await chatPage.submitAndWait(page, message, CHAT_RUN_TIMEOUT_MS);
