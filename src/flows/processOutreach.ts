@@ -28,10 +28,13 @@ import {
   waitForSessionWriteback,
   validateSuccessfulSessionUpdate,
   sessionSnapshot,
-  releaseClaimToPending,
+  releaseClaimToPendingIfStillClaimed,
   reconcileSessionFromControlJson,
   waitForRunningVisibility,
+  guardPlanDrift,
+  plannedTouchAt,
 } from "../notion/sessionRepository.js";
+import { describePlanDrift } from "../notion/outreachState.js";
 import { parsePageUrl } from "../notion/helpers.js";
 import {
   validateLock,
@@ -43,6 +46,7 @@ import {
   markExecutionSubmitted,
   releaseExecutionLock,
   clearExecutionLock,
+  clearRetryCooldown,
 } from "../locks.js";
 import { NotionAiChatPage } from "../pages/notionAiChatPage.js";
 import {
@@ -123,9 +127,11 @@ export async function processOutreachJob(
   const runId = makeRunId(session.sessionId);
   const artifactCtx: ArtifactContext = { recordId: session.sessionId, runId };
 
+  // Identify the touch, not just the Session: scheduled wakes carry no event id,
+  // so the planned outbound time is what makes "this touch was already sent" true.
   const executionKey = buildExecutionKey(
     session.sessionId,
-    session.wakePayloadEventId,
+    session.wakePayloadEventId || plannedTouchAt(session) || session.nextWakeAt,
     session.nextAction,
   );
   let executionToken: string | null = null;
@@ -158,6 +164,11 @@ export async function processOutreachJob(
       throw new SkipError("Lock no longer held by this worker");
     }
     validateSessionBeforeBrowser(session);
+
+    // Outbound due-time gate owned by the worker, not by the AI Prompt: if the
+    // plan says the next touch is days away, no "due" Next Wake At may trigger it.
+    const claimDrift = await guardPlanDrift(session);
+    if (claimDrift) throw new SkipError(describePlanDrift(claimDrift));
 
     // Client ↔ Session is 1:1; client lock blocks Ella/Molly dual-worker
     // Controller runs that race on Interaction writeback / Plan reconciliation.
@@ -226,6 +237,9 @@ export async function processOutreachJob(
         `Status flipped to ${ready.status} at submit gate (expected Running)`,
       );
     }
+    // The Plan stage may have landed a new plan while we prepared the browser.
+    const submitDrift = await guardPlanDrift(ready);
+    if (submitDrift) throw new SkipError(describePlanDrift(submitDrift));
 
     const message = buildOutreachMessage(latest.clientPageUrl!);
     await chatPage.submitAndWait(page, message, CHAT_RUN_TIMEOUT_MS);
@@ -308,6 +322,7 @@ export async function processOutreachJob(
     }
 
     await markExecutionSubmitted(executionKey, executionToken, conversationUrl);
+    await clearRetryCooldown(session.pageId);
     batch.recordSuccessfulRound(conversationUrl);
 
     const cleared = await clearWorkerTechnicalErrorIfSafe(updated);
@@ -347,11 +362,13 @@ export async function processOutreachJob(
     if (error instanceof SkipError) {
       runLog.status_after = statusBefore;
       // Batch pre-claims leave Status=Claimed; if the lock expired while waiting
-      // in queue, put back to Pending so the next poll can pick it up.
+      // in queue, put back to Pending so the next poll can pick it up. Rows the
+      // Prompt already moved on are left alone — they are no longer Claimed.
       if (/lock/i.test(error.message)) {
         try {
-          await releaseClaimToPending(session.pageId);
-          runLog.status_after = SESSION_STATUS.PENDING;
+          if (await releaseClaimToPendingIfStillClaimed(session.pageId)) {
+            runLog.status_after = SESSION_STATUS.PENDING;
+          }
         } catch (releaseErr) {
           logger.warn("Failed to release claim after lock skip", releaseErr);
         }

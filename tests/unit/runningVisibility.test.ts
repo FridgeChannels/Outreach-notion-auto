@@ -2,8 +2,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { SESSION_STATUS } from "../../src/config.js";
 import {
+  classifyVisibilityFailure,
   isRunningVisibilityReady,
-  technicalRetryWakeAt,
+  technicalRetryNotBefore,
   type SessionRecord,
 } from "../../src/notion/sessionRepository.js";
 import {
@@ -26,6 +27,7 @@ function base(overrides: Partial<SessionRecord> = {}): SessionRecord {
     lastRunAt: "2026-07-23T12:00:00.000Z",
     lastError: null,
     lastControlJson: null,
+    outreachStateJson: null,
     wakeReason: null,
     wakePayloadEventId: null,
     retryCount: 0,
@@ -83,11 +85,69 @@ describe("isRunningVisibilityReady", () => {
   });
 });
 
-describe("technicalRetryWakeAt", () => {
+describe("classifyVisibilityFailure", () => {
+  const now = new Date("2026-07-29T11:35:00.000Z");
+  const expected = { nextAction: "Execute Email", clientPageId: "c1" };
+
+  it("treats a future Next Wake At as advanced by the Prompt", () => {
+    // Real shape of the incident: Plan finished and moved the touch to Aug 4.
+    assert.equal(
+      classifyVisibilityFailure(
+        base({ nextWakeAt: "2026-08-04T18:12:00.000Z" }),
+        expected,
+        now,
+      ),
+      "advanced",
+    );
+  });
+
+  it("treats a changed Next Action as advanced", () => {
+    assert.equal(
+      classifyVisibilityFailure(base({ nextAction: "Human Review" }), expected, now),
+      "advanced",
+    );
+    assert.equal(
+      classifyVisibilityFailure(base({ nextAction: "Plan" }), expected, now),
+      "advanced",
+    );
+  });
+
+  it("treats plain API read lag as not-ready so the retry still happens", () => {
+    assert.equal(
+      classifyVisibilityFailure(
+        base({ status: SESSION_STATUS.PENDING, nextWakeAt: "2026-07-29T11:00:00.000Z" }),
+        expected,
+        now,
+      ),
+      "not-ready",
+    );
+    assert.equal(
+      classifyVisibilityFailure(
+        base({ status: SESSION_STATUS.CLAIMED, lastRunAt: null }),
+        expected,
+        now,
+      ),
+      "not-ready",
+    );
+  });
+
+  it("tolerates minute-level clock skew on Next Wake At", () => {
+    assert.equal(
+      classifyVisibilityFailure(
+        base({ nextWakeAt: "2026-07-29T11:35:30.000Z" }),
+        expected,
+        now,
+      ),
+      "not-ready",
+    );
+  });
+});
+
+describe("technicalRetryNotBefore", () => {
   it("backs off by retry count", () => {
     const now = new Date("2026-07-23T12:00:00.000Z");
-    const first = technicalRetryWakeAt(0, now);
-    const second = technicalRetryWakeAt(1, now);
+    const first = technicalRetryNotBefore(0, now);
+    const second = technicalRetryNotBefore(1, now);
     assert.ok(first.getTime() >= now.getTime() + 30_000);
     assert.ok(second.getTime() >= now.getTime() + 60_000);
   });

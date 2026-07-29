@@ -6,12 +6,13 @@ import {
   STALE_CLAIM_MS,
   MAX_TECHNICAL_RETRIES,
   TECHNICAL_SESSION_ERROR_RE,
+  PLAN_DRIFT_TOLERANCE_MS,
   RUNNING_VISIBILITY_TIMEOUT_MS,
   TECHNICAL_RETRY_BACKOFF_BASE_MS,
   type SessionStatus,
   type NextAction,
 } from "../config.js";
-import { InvalidCompletionError, RunningVisibilityError } from "../errors.js";
+import { InvalidCompletionError, RunningVisibilityError, SkipError } from "../errors.js";
 import {
   getNotionClient,
   resolveDataSourceId,
@@ -35,7 +36,17 @@ import {
   parseSessionControlJson,
   type ParsedControlJson,
 } from "./controlJson.js";
-import { isLockHeld } from "../locks.js";
+import {
+  clearRetryCooldown,
+  isLockHeld,
+  setRetryCooldown,
+} from "../locks.js";
+import {
+  describePlanDrift,
+  detectPlanDrift,
+  parseOutreachStateJson,
+  type PlanDrift,
+} from "./outreachState.js";
 import { logger } from "../logging.js";
 
 export interface SessionRecord {
@@ -52,6 +63,7 @@ export interface SessionRecord {
   lastRunAt: string | null;
   lastError: string | null;
   lastControlJson: string | null;
+  outreachStateJson: string | null;
   wakeReason: string | null;
   wakePayloadEventId: string | null;
   retryCount: number;
@@ -69,6 +81,7 @@ interface PropIds {
   lastRunAt: string;
   lastError: string;
   lastControlJson: string;
+  outreachStateJson: string | null;
   retryCount: string;
   nextAction: string;
   latestMeeting: string | null;
@@ -119,6 +132,7 @@ async function propIds(): Promise<PropIds> {
     lastRunAt: req(PROP.LAST_RUN_AT),
     lastError: req(PROP.LAST_ERROR),
     lastControlJson: req(PROP.LAST_CONTROL_JSON),
+    outreachStateJson: findPropertyId(props, PROP.OUTREACH_STATE_JSON),
     retryCount: req(PROP.RETRY_COUNT),
     nextAction: req(PROP.NEXT_ACTION),
     latestMeeting: findPropertyId(props, PROP.LATEST_MEETING),
@@ -205,6 +219,9 @@ export async function loadSession(sessionPageUrl: string): Promise<SessionRecord
     lastRunAt: getDateStart(props, ids.lastRunAt),
     lastError: getRichText(props, ids.lastError) || null,
     lastControlJson: getRichText(props, ids.lastControlJson) || null,
+    outreachStateJson: ids.outreachStateJson
+      ? getRichText(props, ids.outreachStateJson) || null
+      : null,
     wakeReason: ids.wakeReason ? getRichText(props, ids.wakeReason) || null : null,
     wakePayloadEventId,
     retryCount: getNumber(props, ids.retryCount),
@@ -227,11 +244,16 @@ export async function releaseClaimToPending(pageId: string): Promise<void> {
   await getNotionClient().pages.update({ page_id: pageId, properties: payload });
 }
 
-/** Pending + Last Error, without bumping Retry Count (stale claim reclaim). */
+/**
+ * Pending + Last Error, without bumping Retry Count (stale claim reclaim).
+ *
+ * Next Wake At is deliberately untouched: it is the business schedule written by
+ * the Controller Prompt. Overwriting it here made reclaimed rows look due
+ * immediately and let Execute runs fire days before the planned touch.
+ */
 export async function releaseToPendingWithError(
   pageId: string,
   errorMessage: string,
-  nextWakeAt: Date = new Date(),
 ): Promise<void> {
   const ids = await propIds();
   const statusPart = await statusUpdatePayload(await dsId(), ids.status, SESSION_STATUS.PENDING);
@@ -239,12 +261,21 @@ export async function releaseToPendingWithError(
     page_id: pageId,
     properties: {
       ...statusPart,
-      [ids.nextWakeAt]: { date: { start: nextWakeAt.toISOString() } },
       [ids.lastError]: {
         rich_text: [{ type: "text", text: { content: errorMessage.slice(0, 2000) } }],
       },
     },
   });
+}
+
+/** Claimed → Pending only while still Claimed, so AI writeback is never clobbered. */
+export async function releaseClaimToPendingIfStillClaimed(
+  pageId: string,
+): Promise<boolean> {
+  const live = await loadSession(pageIdToUrl(pageId));
+  if (live.status !== SESSION_STATUS.CLAIMED) return false;
+  await releaseClaimToPending(pageId);
+  return true;
 }
 
 export async function markRunning(pageId: string, startedAt: Date): Promise<void> {
@@ -288,6 +319,63 @@ export function isRunningVisibilityReady(
 }
 
 /**
+ * Why visibility is not ready yet.
+ *
+ * - `advanced`: the Prompt already moved this Session on (new Next Action, or a
+ *   future Next Wake At). Waiting cannot help and retrying is wrong — the run
+ *   was scheduled from a stale due-list snapshot.
+ * - `not-ready`: plain API read lag; keep polling, then retry.
+ *
+ * Only Prompt-written fields are used as signals; Status alone is too racy to
+ * distinguish read lag from real progress.
+ */
+export type VisibilityFailure = "advanced" | "not-ready";
+
+export function classifyVisibilityFailure(
+  session: SessionRecord,
+  expected: RunningVisibilityExpectation,
+  now = new Date(),
+  toleranceMs = PLAN_DRIFT_TOLERANCE_MS,
+): VisibilityFailure {
+  if (
+    !session.nextAction ||
+    session.nextAction === NEXT_ACTION.NONE ||
+    session.nextAction === NEXT_ACTION.HUMAN_REVIEW
+  ) {
+    return "advanced";
+  }
+  if (session.nextAction !== expected.nextAction) return "advanced";
+  if (
+    session.nextWakeAt &&
+    new Date(session.nextWakeAt).getTime() > now.getTime() + toleranceMs
+  ) {
+    return "advanced";
+  }
+  return "not-ready";
+}
+
+async function setSessionStatus(pageId: string, status: SessionStatus): Promise<void> {
+  const ids = await propIds();
+  const payload = await statusUpdatePayload(await dsId(), ids.status, status);
+  await getNotionClient().pages.update({ page_id: pageId, properties: payload });
+}
+
+/**
+ * Undo our own markRunning after discovering the Prompt already advanced the row,
+ * so Status stops contradicting Last Control JSON.
+ */
+async function restoreSessionAfterAdvance(session: SessionRecord): Promise<void> {
+  const reconciled = await reconcileSessionFromControlJson(session);
+  if (reconciled) return;
+  const wakeMs = session.nextWakeAt ? new Date(session.nextWakeAt).getTime() : NaN;
+  const target =
+    !Number.isNaN(wakeMs) && wakeMs > Date.now()
+      ? SESSION_STATUS.SLEEPING
+      : SESSION_STATUS.PENDING;
+  await setSessionStatus(session.pageId, target);
+}
+
+/**
  * After markRunning, poll until Notion API read-back shows Running + expected
  * Next Action / Wake At so the AI Controller sees a consistent Session row.
  */
@@ -309,6 +397,13 @@ export async function waitForRunningVisibility(
       });
       return last;
     }
+    if (classifyVisibilityFailure(last, expected) === "advanced") {
+      await restoreSessionAfterAdvance(last);
+      throw new SkipError(
+        `Session advanced by Prompt before submit: status=${last.status}, ` +
+          `nextAction=${last.nextAction} (expected ${expected.nextAction}), nextWakeAt=${last.nextWakeAt}`,
+      );
+    }
     await new Promise((r) => setTimeout(r, pollMs));
     pollMs = Math.min(1_000, Math.round(pollMs * 1.5));
     last = await loadSession(sessionPageUrl);
@@ -318,8 +413,58 @@ export async function waitForRunningVisibility(
   );
 }
 
+/**
+ * Repair a Session whose Next Wake At drifted away from the planned outbound time
+ * by restoring the plan's `next_touch_at` and putting the row back to Sleeping.
+ */
+export async function healSessionScheduleFromPlan(
+  session: SessionRecord,
+  drift: PlanDrift,
+): Promise<SessionRecord> {
+  const ids = await propIds();
+  const statusPart = await statusUpdatePayload(
+    await dsId(),
+    ids.status,
+    SESSION_STATUS.SLEEPING,
+  );
+  const reason = describePlanDrift(drift);
+  await getNotionClient().pages.update({
+    page_id: session.pageId,
+    properties: {
+      ...statusPart,
+      [ids.nextWakeAt]: { date: { start: drift.plannedAt } },
+      [ids.retryCount]: { number: 0 },
+      [ids.lastError]: {
+        rich_text: [{ type: "text", text: { content: reason.slice(0, 2000) } }],
+      },
+    },
+  });
+  await clearRetryCooldown(session.pageId);
+  logger.warn("Healed Next Wake At from Outreach State JSON", {
+    pageId: session.pageId,
+    from: drift.wakeAt,
+    to: drift.plannedAt,
+    nextAction: drift.nextAction,
+  });
+  return loadSession(session.pageUrl);
+}
+
+/**
+ * Hard gate before any outbound run: a Session whose plan points to a future touch
+ * must never be executed now, however "due" Next Wake At looks. Heals and reports.
+ */
+export async function guardPlanDrift(
+  session: SessionRecord,
+  now = new Date(),
+): Promise<PlanDrift | null> {
+  const drift = detectPlanDrift(session, now);
+  if (!drift) return null;
+  await healSessionScheduleFromPlan(session, drift);
+  return drift;
+}
+
 /** Stagger retries when many workers hit the same consistency window. */
-export function technicalRetryWakeAt(retryCount: number, now = new Date()): Date {
+export function technicalRetryNotBefore(retryCount: number, now = new Date()): Date {
   const delayMs =
     TECHNICAL_RETRY_BACKOFF_BASE_MS * (retryCount + 1) +
     Math.floor(Math.random() * 15_000);
@@ -358,6 +503,10 @@ export async function clearWorkerTechnicalErrorIfSafe(session: SessionRecord): P
   return true;
 }
 
+/**
+ * Retry a technical failure: Status back to Pending, Retry Count bumped, and the
+ * backoff recorded in the shared cooldown file — never in Next Wake At.
+ */
 export async function scheduleTechnicalRetry(
   pageId: string,
   errorMessage: string,
@@ -365,13 +514,13 @@ export async function scheduleTechnicalRetry(
 ): Promise<void> {
   const ids = await propIds();
   const statusPart = await statusUpdatePayload(await dsId(), ids.status, SESSION_STATUS.PENDING);
-  const wakeAt = technicalRetryWakeAt(currentRetryCount);
+  const notBefore = technicalRetryNotBefore(currentRetryCount);
+  await setRetryCooldown(pageId, notBefore, errorMessage);
   await getNotionClient().pages.update({
     page_id: pageId,
     properties: {
       ...statusPart,
       [ids.retryCount]: { number: currentRetryCount + 1 },
-      [ids.nextWakeAt]: { date: { start: wakeAt.toISOString() } },
       [ids.lastError]: {
         rich_text: [{ type: "text", text: { content: errorMessage.slice(0, 2000) } }],
       },
@@ -563,6 +712,11 @@ export function validateSuccessfulSessionUpdate(session: SessionRecord, startedA
   }
 }
 
+/** Planned outbound time from the Plan stage, used as the touch identity. */
+export function plannedTouchAt(session: SessionRecord): string | null {
+  return parseOutreachStateJson(session.outreachStateJson)?.nextTouchAt ?? null;
+}
+
 export function sessionSnapshot(session: SessionRecord): Record<string, unknown> {
   return {
     session_id: session.sessionId,
@@ -570,6 +724,7 @@ export function sessionSnapshot(session: SessionRecord): Record<string, unknown>
     next_action: session.nextAction,
     conversation_url: session.conversationUrl,
     next_wake_at: session.nextWakeAt,
+    planned_touch_at: plannedTouchAt(session),
     last_run_at: session.lastRunAt,
     last_control_json: session.lastControlJson,
     last_error: session.lastError,
@@ -728,6 +883,15 @@ export async function reclaimStuckSessions(now = new Date()): Promise<ReclaimRes
             });
             continue;
           }
+          if (await guardPlanDrift(session, now)) {
+            result.reconciled++;
+            result.details.push({
+              pageId: session.pageId,
+              action: "healed_plan_drift",
+              reason: "next_wake_at_restored_from_outreach_state",
+            });
+            continue;
+          }
           if (
             isStaleClaimOrRunning(session.status, session.lastRunAt, nowMs, STALE_CLAIM_MS)
           ) {
@@ -750,6 +914,15 @@ export async function reclaimStuckSessions(now = new Date()): Promise<ReclaimRes
               pageId: session.pageId,
               action: "reconciled",
               reason: `error_control_json -> ${reconciled.status}`,
+            });
+            continue;
+          }
+          if (await guardPlanDrift(session, now)) {
+            result.reconciled++;
+            result.details.push({
+              pageId: session.pageId,
+              action: "healed_plan_drift",
+              reason: "error_next_wake_at_restored_from_outreach_state",
             });
             continue;
           }
@@ -870,6 +1043,96 @@ export async function listDueMissingLatestInteraction(
     });
   }
   return rows;
+}
+
+export interface PlanDriftRow {
+  session: SessionRecord;
+  drift: PlanDrift;
+  locked: boolean;
+}
+
+export interface PlanDriftScan {
+  scanned: number;
+  drifted: PlanDriftRow[];
+}
+
+/** Read-only sweep for Sessions whose Next Wake At disagrees with their plan. */
+export async function scanPlanDriftedSessions(now = new Date()): Promise<PlanDriftScan> {
+  const client = getNotionClient();
+  const dataSourceId = await dsId();
+  const result: PlanDriftScan = { scanned: 0, drifted: [] };
+
+  const pageIds: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const response = await withNotionRetry("scanPlanDriftedSessions.query", async () =>
+      client.dataSources.query({
+        data_source_id: dataSourceId,
+        page_size: 100,
+        start_cursor: cursor,
+        result_type: "page",
+      }),
+    );
+    for (const page of response.results ?? []) {
+      if (page && "id" in page) pageIds.push(page.id);
+    }
+    cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+  } while (cursor);
+
+  for (const pageId of pageIds) {
+    try {
+      const session = await loadSession(pageIdToUrl(pageId));
+      result.scanned++;
+      const drift = detectPlanDrift(session, now);
+      if (!drift) continue;
+      result.drifted.push({
+        session,
+        drift,
+        locked: await isLockHeld("session", session.pageId),
+      });
+    } catch (e) {
+      logger.warn("scanPlanDriftedSessions: skip one session", {
+        pageId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+  return result;
+}
+
+export interface PlanDriftHealResult {
+  scanned: number;
+  healed: Array<{ pageId: string; from: string | null; to: string }>;
+  skippedLocked: number;
+}
+
+/**
+ * Ops sweep: restore Next Wake At from Outreach State JSON for every Session whose
+ * schedule was overwritten by a technical path. Safe to run repeatedly; rows that
+ * already agree with their plan are left untouched.
+ */
+export async function healPlanDriftedSessions(
+  now = new Date(),
+): Promise<PlanDriftHealResult> {
+  const scan = await scanPlanDriftedSessions(now);
+  const result: PlanDriftHealResult = {
+    scanned: scan.scanned,
+    healed: [],
+    skippedLocked: 0,
+  };
+  for (const row of scan.drifted) {
+    if (row.locked) {
+      result.skippedLocked++;
+      continue;
+    }
+    await healSessionScheduleFromPlan(row.session, row.drift);
+    result.healed.push({
+      pageId: row.session.pageId,
+      from: row.drift.wakeAt,
+      to: row.drift.plannedAt,
+    });
+  }
+  return result;
 }
 
 /** One-shot heal: Claimed → Pending; technical Error → Pending or reconcile. */

@@ -26,6 +26,7 @@ function base(overrides: Partial<SessionRecord> = {}): SessionRecord {
     lastRunAt: null,
     lastError: null,
     lastControlJson: null,
+    outreachStateJson: null,
     wakeReason: null,
     wakePayloadEventId: null,
     retryCount: 0,

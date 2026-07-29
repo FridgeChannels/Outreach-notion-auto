@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { LOCK_TTL_MS, WORKER_ID } from "./config.js";
+import { LOCK_TTL_MS, SUBMITTED_EXECUTION_TTL_MS, WORKER_ID } from "./config.js";
 import { logger } from "./logging.js";
 
 export type LockKind = "session" | "mailbox" | "client";
@@ -54,13 +54,20 @@ async function writeLockAtomic(path: string, record: LockRecord): Promise<void> 
   await rename(tmp, path);
 }
 
-/** Job-level idempotency: sessionId + wake event + nextAction. */
+/**
+ * Job-level idempotency: sessionId + the touch this run belongs to + nextAction.
+ *
+ * `touchKey` must identify the planned touch (wake event id, or the planned
+ * outbound time). Scheduled wakes carry no event id, so without the planned time
+ * every touch of a Session shared one key: the mark for touch N either blocked
+ * touch N+1 forever, or — once it expired — allowed the same touch to be sent twice.
+ */
 export function buildExecutionKey(
   sessionId: string,
-  wakePayloadEventId: string | null | undefined,
+  touchKey: string | null | undefined,
   nextAction: string | null | undefined,
 ): string {
-  return [sessionId || "", wakePayloadEventId || "none", nextAction || "none"].join(":");
+  return [sessionId || "", touchKey || "none", nextAction || "none"].join(":");
 }
 
 function executionLockPath(executionKey: string): string {
@@ -138,17 +145,19 @@ export async function clearExecutionLocksOwnedByThisWorker(): Promise<number> {
     if (!name.endsWith(".json")) continue;
     const path = join(dir, name);
     const record = (await readLock(path)) as unknown as ExecutionLockRecord | null;
-    if (record?.workerId === WORKER_ID) {
-      try {
-        await unlink(path);
-        n++;
-        logger.warn(
-          `Cleared stale execution lock ${name} owned by ${WORKER_ID}` +
-            (record.submittedAt ? " (was marked submitted)" : ""),
-        );
-      } catch {
-        // ignore
-      }
+    if (record?.workerId !== WORKER_ID) continue;
+    // Never drop a submitted mark: it is the duplicate-send guard for a touch
+    // that really was handed to the AI. Only in-flight reservations are cleared.
+    if (record.submittedAt) {
+      logger.info(`Kept submitted execution mark ${name} (duplicate-send guard)`);
+      continue;
+    }
+    try {
+      await unlink(path);
+      n++;
+      logger.warn(`Cleared stale execution lock ${name} owned by ${WORKER_ID}`);
+    } catch {
+      // ignore
     }
   }
   return n;
@@ -255,7 +264,7 @@ export async function markExecutionSubmitted(
   if (!record || record.token !== token) return;
   record.submittedAt = new Date().toISOString();
   record.conversationUrl = conversationUrl;
-  record.expiresAt = new Date(Date.now() + LOCK_TTL_MS).toISOString();
+  record.expiresAt = new Date(Date.now() + SUBMITTED_EXECUTION_TTL_MS).toISOString();
   await writeLockAtomic(path, record as unknown as LockRecord);
 }
 
@@ -274,6 +283,90 @@ export async function releaseExecutionLock(
   } catch {
     // ignore
   }
+}
+
+interface RetryCooldownRecord {
+  pageId: string;
+  notBefore: string;
+  reason: string;
+  workerId: string;
+  writtenAt: string;
+}
+
+function retryCooldownPath(pageId: string): string {
+  const safe = pageId.replace(/[^a-zA-Z0-9:_-]/g, "_");
+  return join(process.cwd(), "data", "retry-cooldowns", `${safe}.json`);
+}
+
+/**
+ * Technical retry backoff, held outside Notion.
+ *
+ * Next Wake At belongs to the Controller Prompt (it mirrors Outreach State JSON
+ * `next_touch_at`), so the worker must not use it as its own retry timer. The
+ * cooldown lives in the shared ./data volume, so all workers honour one backoff.
+ */
+export async function setRetryCooldown(
+  pageId: string,
+  notBefore: Date,
+  reason: string,
+): Promise<void> {
+  const path = retryCooldownPath(pageId);
+  const record: RetryCooldownRecord = {
+    pageId,
+    notBefore: notBefore.toISOString(),
+    reason: reason.slice(0, 500),
+    workerId: WORKER_ID,
+    writtenAt: new Date().toISOString(),
+  };
+  await writeLockAtomic(path, record as unknown as LockRecord);
+}
+
+export async function getRetryCooldown(
+  pageId: string,
+): Promise<RetryCooldownRecord | null> {
+  return (await readLock(retryCooldownPath(pageId))) as unknown as RetryCooldownRecord | null;
+}
+
+export async function isRetryCoolingDown(
+  pageId: string,
+  now = new Date(),
+): Promise<boolean> {
+  const record = await getRetryCooldown(pageId);
+  if (!record?.notBefore) return false;
+  const until = new Date(record.notBefore).getTime();
+  if (Number.isNaN(until)) return false;
+  return now.getTime() < until;
+}
+
+export async function clearRetryCooldown(pageId: string): Promise<void> {
+  try {
+    await unlink(retryCooldownPath(pageId));
+  } catch {
+    // ignore missing
+  }
+}
+
+/** Remove cooldown files whose window already passed. */
+export async function clearExpiredRetryCooldowns(now = new Date()): Promise<number> {
+  const dir = join(process.cwd(), "data", "retry-cooldowns");
+  if (!existsSync(dir)) return 0;
+  const { readdir } = await import("node:fs/promises");
+  let n = 0;
+  for (const name of await readdir(dir)) {
+    if (!name.endsWith(".json")) continue;
+    const path = join(dir, name);
+    const record = (await readLock(path)) as unknown as RetryCooldownRecord | null;
+    const until = record?.notBefore ? new Date(record.notBefore).getTime() : 0;
+    if (!record || Number.isNaN(until) || now.getTime() >= until) {
+      try {
+        await unlink(path);
+        n++;
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return n;
 }
 
 export function startLockHeartbeat(

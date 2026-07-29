@@ -4,6 +4,8 @@ import {
   loadSession,
   releaseClaimToPending,
   healStuckSessions,
+  healPlanDriftedSessions,
+  scanPlanDriftedSessions,
   listDueMissingLatestInteraction,
   countSessionsByStatus,
 } from "../src/notion/sessionRepository.js";
@@ -12,12 +14,35 @@ import { pageIdToUrl } from "../src/notion/helpers.js";
 import { getNotionClient, resolveDataSourceId } from "../src/notion/helpers.js";
 import { SESSION_DATA_SOURCE_URL, SESSION_STATUS } from "../src/config.js";
 import { MAILBOX_STATE_DATA_SOURCE_URL } from "../src/config.js";
-import { clearExpiredLocks } from "../src/locks.js";
+import { clearExpiredLocks, clearExpiredRetryCooldowns } from "../src/locks.js";
 
 async function main(): Promise<void> {
   const release = process.argv.includes("--release-claimed");
   const heal = process.argv.includes("--heal");
+  const healDrift = process.argv.includes("--heal-drift");
+  const showDrift = process.argv.includes("--drift");
   const missingLi = process.argv.includes("--missing-li");
+
+  // Report-only: which Sessions would fire before their planned outbound time.
+  if (showDrift && !healDrift && !heal) {
+    const scan = await scanPlanDriftedSessions();
+    console.log(`=== Plan drift (scanned ${scan.scanned}) ===`);
+    console.log(`drifted=${scan.drifted.length}`);
+    for (const { session, drift, locked } of scan.drifted) {
+      console.log(
+        `  ${session.status} | ${drift.nextAction} | wake=${drift.wakeAt} -> planned=${drift.plannedAt}` +
+          ` | +${Math.round(drift.driftMs / 60_000)}min${locked ? " | LOCKED (worker active)" : ""}`,
+      );
+      console.log(`    ${session.pageUrl}`);
+    }
+    return;
+  }
+
+  if (healDrift && !heal) {
+    console.log("Heal plan drift:", await healPlanDriftedSessions());
+    console.log("Status counts:", await countSessionsByStatus());
+    return;
+  }
 
   if (heal || release) {
     if (release && !heal) {
@@ -42,10 +67,14 @@ async function main(): Promise<void> {
     } else {
       const result = await healStuckSessions();
       console.log("Heal result:", result);
+      console.log("Heal plan drift:", await healPlanDriftedSessions());
     }
     const clearedSession = await clearExpiredLocks("session");
     const clearedMailbox = await clearExpiredLocks("mailbox");
-    console.log(`Cleared expired locks: session=${clearedSession} mailbox=${clearedMailbox}`);
+    const clearedCooldowns = await clearExpiredRetryCooldowns();
+    console.log(
+      `Cleared expired locks: session=${clearedSession} mailbox=${clearedMailbox} cooldowns=${clearedCooldowns}`,
+    );
     console.log("Status counts:", await countSessionsByStatus());
     return;
   }

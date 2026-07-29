@@ -1,10 +1,19 @@
-import { acquireLock, releaseLock } from "../locks.js";
+import {
+  acquireLock,
+  clearExpiredRetryCooldowns,
+  isRetryCoolingDown,
+  releaseLock,
+} from "../locks.js";
 import {
   claimSession,
   countSessionsByStatus,
   fetchDueSessions,
+  guardPlanDrift,
+  loadSession,
   reclaimStuckSessions,
+  type DueSessionRow,
 } from "../notion/sessionRepository.js";
+import { isSchedulerEligible } from "./validators.js";
 import { fetchDueMailboxes } from "../notion/mailboxRepository.js";
 import { closeBrowserContext, openBrowserContext } from "../browser.js";
 import { OutreachBatchChat } from "./chatReuse.js";
@@ -12,7 +21,24 @@ import { processOutreachJob, type OutreachJob } from "./processOutreach.js";
 import { processMailboxJob, type MailboxJob } from "./processMailbox.js";
 import { logger } from "../logging.js";
 import { startTracing, stopTracing } from "../artifacts.js";
-import { OUTREACH_BATCH_LIMIT } from "../config.js";
+import { OUTREACH_BATCH_LIMIT, WORKER_ID } from "../config.js";
+
+/**
+ * Start each worker at a different index of the shared due list.
+ *
+ * All workers query the same "Next Wake At ascending" page, so without an offset
+ * they march through identical rows and pile up on the same locks.
+ */
+export function rotateForWorker(
+  rows: DueSessionRow[],
+  workerId = WORKER_ID,
+): DueSessionRow[] {
+  if (rows.length < 2) return [...rows];
+  let hash = 0;
+  for (const ch of workerId) hash = (hash * 31 + ch.charCodeAt(0)) % 1_000_003;
+  const offset = hash % rows.length;
+  return [...rows.slice(offset), ...rows.slice(0, offset)];
+}
 
 /**
  * Lazy claim: lock + claim one Session at a time inside the batch loop.
@@ -22,6 +48,7 @@ import { OUTREACH_BATCH_LIMIT } from "../config.js";
 export async function pollAndProcessOutreach(
   limit = OUTREACH_BATCH_LIMIT,
 ): Promise<void> {
+  await clearExpiredRetryCooldowns().catch(() => 0);
   const reclaim = await reclaimStuckSessions();
   if (reclaim.reclaimed || reclaim.reconciled) {
     logger.info("Reclaimed stuck sessions", {
@@ -53,10 +80,53 @@ export async function pollAndProcessOutreach(
   let skipCount = 0;
 
   try {
-    for (const row of due) {
+    for (const row of rotateForWorker(due)) {
+      if (await isRetryCoolingDown(row.pageId)) {
+        logger.info(`Skip session (technical retry cooldown): ${row.pageId}`);
+        skipCount++;
+        continue;
+      }
+
       const token = await acquireLock("session", row.pageId);
       if (!token) {
         logger.info(`Skip session (locked): ${row.pageId}`);
+        skipCount++;
+        continue;
+      }
+
+      // The due list is a snapshot: rows ahead in the batch take minutes each, so
+      // by now another worker's AI run may already have advanced this Session.
+      // Claiming a row that is no longer due is what dragged completed plans back
+      // into a run and ultimately rewrote their schedule.
+      let fresh: Awaited<ReturnType<typeof loadSession>>;
+      try {
+        fresh = await loadSession(row.pageUrl);
+      } catch (e) {
+        await releaseLock("session", row.pageId, token);
+        logger.warn(`Re-read failed for ${row.pageId}`, e);
+        failCount++;
+        continue;
+      }
+
+      if (!isSchedulerEligible(fresh.status, fresh.nextAction, fresh.nextWakeAt)) {
+        await releaseLock("session", row.pageId, token);
+        logger.info(`Skip session (no longer due): ${row.pageId}`, {
+          status: fresh.status,
+          nextAction: fresh.nextAction,
+          nextWakeAt: fresh.nextWakeAt,
+        });
+        skipCount++;
+        continue;
+      }
+
+      const drift = await guardPlanDrift(fresh);
+      if (drift) {
+        await releaseLock("session", row.pageId, token);
+        logger.warn(`Skip session (plan drift healed): ${row.pageId}`, {
+          wakeAt: drift.wakeAt,
+          plannedAt: drift.plannedAt,
+          nextAction: drift.nextAction,
+        });
         skipCount++;
         continue;
       }

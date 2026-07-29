@@ -48,6 +48,13 @@ export const RUNNING_VISIBILITY_GRACE_MS =
 export const TECHNICAL_RETRY_BACKOFF_BASE_MS =
   Number(process.env.TECHNICAL_RETRY_BACKOFF_BASE_MS) || 30_000;
 /**
+ * Allowed gap between Session.Next Wake At and Outreach State JSON
+ * model_state.next_touch_at. Both are minute-precision, so a small delta is
+ * normal; anything larger means the schedule was rewritten by a technical path.
+ */
+export const PLAN_DRIFT_TOLERANCE_MS =
+  Number(process.env.PLAN_DRIFT_TOLERANCE_MS) || 120_000;
+/**
  * Notion AI Controller validation / gate failures — transient under multi-worker load.
  */
 export const CONTROLLER_VALIDATION_ERROR_RE =
@@ -67,6 +74,13 @@ export const AUTO_CLICK_CONTINUE = process.env.AUTO_CLICK_CONTINUE !== "false";
 export const MAX_TECHNICAL_RETRIES = 2;
 export const LOCK_TTL_MS = Number(process.env.LOCK_TTL_MS) || 15 * 60 * 1000;
 export const LOCK_HEARTBEAT_INTERVAL_MS = 60 * 1000;
+/**
+ * "Already submitted" execution records must outlive LOCK_TTL_MS — they are the
+ * only local proof that a planned touch was already sent to the AI. A 15 min TTL
+ * let the same touch be re-submitted ~40 min later as a duplicate outbound.
+ */
+export const SUBMITTED_EXECUTION_TTL_MS =
+  Number(process.env.SUBMITTED_EXECUTION_TTL_MS) || 90 * 24 * 60 * 60 * 1000;
 
 /**
  * Within one poll batch, reuse the same Notion AI chat for this many successful
@@ -90,6 +104,7 @@ export const PROP = {
   LAST_RUN_AT: "Last Run At",
   LAST_ERROR: "Last Error",
   LAST_CONTROL_JSON: "Last Control JSON",
+  OUTREACH_STATE_JSON: "Outreach State JSON",
   RETRY_COUNT: "Retry Count",
   NEXT_ACTION: "Next Action",
   LATEST_MEETING: "Latest Meeting",
