@@ -34,6 +34,20 @@ describe("locks", () => {
     await releaseLock("session", id, t2!);
   });
 
+  it("client lock is separate from session and blocks second acquirer", async () => {
+    const clientId = `client-${Date.now()}`;
+    const sessionId = `sess-${Date.now()}`;
+    const c1 = await acquireLock("client", clientId);
+    const s1 = await acquireLock("session", sessionId);
+    assert.ok(c1);
+    assert.ok(s1);
+    assert.equal(await acquireLock("client", clientId), null);
+    assert.equal(await isLockHeld("client", clientId), true);
+    await releaseLock("client", clientId, c1!);
+    await releaseLock("session", sessionId, s1!);
+    assert.equal(await isLockHeld("client", clientId), false);
+  });
+
   it("execution key blocks duplicate submit", async () => {
     const key = buildExecutionKey(`s-${Date.now()}`, "meeting:abc:1", "Plan");
     const t1 = await acquireExecutionLock(key);

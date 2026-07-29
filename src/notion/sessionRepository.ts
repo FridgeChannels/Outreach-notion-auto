@@ -706,6 +706,17 @@ export async function reclaimStuckSessions(now = new Date()): Promise<ReclaimRes
             });
             continue;
           }
+          if (
+            session.clientPageId &&
+            (await isLockHeld("client", session.clientPageId))
+          ) {
+            result.details.push({
+              pageId: session.pageId,
+              action: "skipped_locked",
+              reason: "active_client_lock",
+            });
+            continue;
+          }
 
           const reconciled = await reconcileSessionFromControlJson(session);
           if (reconciled) {

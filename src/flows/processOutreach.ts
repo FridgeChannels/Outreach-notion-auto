@@ -36,6 +36,7 @@ import { parsePageUrl } from "../notion/helpers.js";
 import {
   validateLock,
   releaseLock,
+  acquireLock,
   startLockHeartbeat,
   buildExecutionKey,
   acquireExecutionLock,
@@ -128,10 +129,13 @@ export async function processOutreachJob(
     session.nextAction,
   );
   let executionToken: string | null = null;
+  let clientLockToken: string | null = null;
+  let clientPageId: string | null = session.clientPageId;
 
   const chatPage = batch.chatPage;
   let page: Page | null = null;
-  let heartbeat: { stop: () => void } | null = null;
+  let sessionHeartbeat: { stop: () => void } | null = null;
+  let clientHeartbeat: { stop: () => void } | null = null;
   let tracingSaved = false;
 
   const runLog: RunLogEntry = {
@@ -155,6 +159,21 @@ export async function processOutreachJob(
     }
     validateSessionBeforeBrowser(session);
 
+    // Client ↔ Session is 1:1; client lock blocks Ella/Molly dual-worker
+    // Controller runs that race on Interaction writeback / Plan reconciliation.
+    clientLockToken = await acquireLock("client", session.clientPageId!);
+    if (!clientLockToken) {
+      throw new SkipError(
+        `Client lock held by another worker: ${session.clientPageId}`,
+      );
+    }
+    clientHeartbeat = startLockHeartbeat(
+      "client",
+      session.clientPageId!,
+      clientLockToken,
+      LOCK_HEARTBEAT_INTERVAL_MS,
+    );
+
     executionToken = await acquireExecutionLock(executionKey);
     if (!executionToken) {
       throw new SkipError(`Duplicate execution blocked: ${executionKey}`);
@@ -167,7 +186,7 @@ export async function processOutreachJob(
       throw new SkipError("Next Action is empty before submit");
     }
     await markRunning(session.pageId, startedAt);
-    heartbeat = startLockHeartbeat(
+    sessionHeartbeat = startLockHeartbeat(
       "session",
       session.pageId,
       job.lockToken,
@@ -368,11 +387,15 @@ export async function processOutreachJob(
     logger.error("Outreach job failed", error);
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   } finally {
-    heartbeat?.stop();
+    sessionHeartbeat?.stop();
+    clientHeartbeat?.stop();
     if (executionToken) {
       await releaseExecutionLock(executionKey, executionToken, {
         onlyIfNotSubmitted: true,
       });
+    }
+    if (clientLockToken && clientPageId) {
+      await releaseLock("client", clientPageId, clientLockToken);
     }
     await releaseLock("session", session.pageId, job.lockToken);
     // Keep batch.page open for the next Session in this poll cycle

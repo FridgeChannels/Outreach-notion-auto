@@ -5,6 +5,8 @@ dist/
 .DS_Store
 data/session-locks/
 data/mailbox-locks/
+data/client-locks/
+data/execution-locks/
 artifacts/
 .playwright-tmp/
 .playwright/

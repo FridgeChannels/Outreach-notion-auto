@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 import { LOCK_TTL_MS, WORKER_ID } from "./config.js";
 import { logger } from "./logging.js";
 
+export type LockKind = "session" | "mailbox" | "client";
+
 interface LockRecord {
   token: string;
   key: string;
@@ -13,13 +15,22 @@ interface LockRecord {
   expiresAt: string;
 }
 
-function lockDir(kind: "session" | "mailbox"): string {
-  return join(process.cwd(), "data", kind === "session" ? "session-locks" : "mailbox-locks");
+const LOCK_DIR_NAME: Record<LockKind, string> = {
+  session: "session-locks",
+  mailbox: "mailbox-locks",
+  client: "client-locks",
+};
+
+function lockDir(kind: LockKind): string {
+  return join(process.cwd(), "data", LOCK_DIR_NAME[kind]);
 }
 
-function lockFilePath(kind: "session" | "mailbox", id: string): string {
-  const key = kind === "session" ? `followup:session:${id}` : `followup:mailbox:${id}`;
-  const safe = key.replace(/[^a-zA-Z0-9:_-]/g, "_");
+function lockKey(kind: LockKind, id: string): string {
+  return `followup:${kind}:${id}`;
+}
+
+function lockFilePath(kind: LockKind, id: string): string {
+  const safe = lockKey(kind, id).replace(/[^a-zA-Z0-9:_-]/g, "_");
   return join(lockDir(kind), `${safe}.json`);
 }
 
@@ -67,10 +78,7 @@ interface ExecutionLockRecord {
   expiresAt: string;
 }
 
-export async function acquireLock(
-  kind: "session" | "mailbox",
-  id: string,
-): Promise<string | null> {
+export async function acquireLock(kind: LockKind, id: string): Promise<string | null> {
   await mkdir(lockDir(kind), { recursive: true });
   const path = lockFilePath(kind, id);
   const existing = await readLock(path);
@@ -82,7 +90,7 @@ export async function acquireLock(
   const now = new Date();
   const record: LockRecord = {
     token,
-    key: kind === "session" ? `followup:session:${id}` : `followup:mailbox:${id}`,
+    key: lockKey(kind, id),
     workerId: WORKER_ID,
     acquiredAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + LOCK_TTL_MS).toISOString(),
@@ -96,7 +104,7 @@ export async function acquireLock(
 /** Clear locks left by a previous process with the same WORKER_ID (Ctrl+C / crash). */
 export async function clearLocksOwnedByThisWorker(): Promise<number> {
   let n = 0;
-  for (const kind of ["session", "mailbox"] as const) {
+  for (const kind of ["session", "mailbox", "client"] as const) {
     const dir = lockDir(kind);
     if (!existsSync(dir)) continue;
     const { readdir } = await import("node:fs/promises");
@@ -158,7 +166,7 @@ export async function clearExecutionLock(executionKey: string): Promise<void> {
 }
 
 export async function validateLock(
-  kind: "session" | "mailbox",
+  kind: LockKind,
   id: string,
   token: string,
 ): Promise<boolean> {
@@ -168,16 +176,13 @@ export async function validateLock(
 }
 
 /** True when a non-expired lock file exists (any worker). Used by reclaim watchdog. */
-export async function isLockHeld(
-  kind: "session" | "mailbox",
-  id: string,
-): Promise<boolean> {
+export async function isLockHeld(kind: LockKind, id: string): Promise<boolean> {
   const record = await readLock(lockFilePath(kind, id));
   return Boolean(record && !isExpired(record));
 }
 
 export async function renewLock(
-  kind: "session" | "mailbox",
+  kind: LockKind,
   id: string,
   token: string,
 ): Promise<boolean> {
@@ -190,7 +195,7 @@ export async function renewLock(
 }
 
 export async function releaseLock(
-  kind: "session" | "mailbox",
+  kind: LockKind,
   id: string,
   token: string,
 ): Promise<void> {
@@ -214,7 +219,7 @@ export async function acquireExecutionLock(
 ): Promise<string | null> {
   await mkdir(join(process.cwd(), "data", "execution-locks"), { recursive: true });
   const path = executionLockPath(executionKey);
-  const existing = await readLock(path) as unknown as ExecutionLockRecord | null;
+  const existing = (await readLock(path)) as unknown as ExecutionLockRecord | null;
   if (existing && !isExpired(existing as unknown as LockRecord)) {
     if (existing.submittedAt) {
       logger.info(`Execution already submitted: ${executionKey}`);
@@ -272,7 +277,7 @@ export async function releaseExecutionLock(
 }
 
 export function startLockHeartbeat(
-  kind: "session" | "mailbox",
+  kind: LockKind,
   id: string,
   token: string,
   intervalMs: number,
@@ -283,10 +288,8 @@ export function startLockHeartbeat(
   return { stop: () => clearInterval(timer) };
 }
 
-/** Remove expired session/mailbox lock files (diagnose / heal). */
-export async function clearExpiredLocks(
-  kind: "session" | "mailbox" = "session",
-): Promise<number> {
+/** Remove expired lock files (diagnose / heal). */
+export async function clearExpiredLocks(kind: LockKind = "session"): Promise<number> {
   const { readdir } = await import("node:fs/promises");
   const dir = lockDir(kind);
   if (!existsSync(dir)) return 0;
