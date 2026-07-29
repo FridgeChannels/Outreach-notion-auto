@@ -4,6 +4,7 @@ import {
   NOTION_AI_MODEL_DEFAULT,
   UI_ACTION_TIMEOUT_MS,
   AI_PANEL_TIMEOUT_MS,
+  AUTO_CLICK_CONTINUE,
   OUTREACH_CONTROLLER_PROMPT_URL,
   MAILBOX_REPLY_SCAN_PROMPT_URL,
   toChatEntryUrl,
@@ -881,6 +882,8 @@ export class NotionAiChatPage {
 
   /** Resume a paused AI run when Notion shows a visible "Continue" button. */
   private async clickContinueButton(page: Page): Promise<boolean> {
+    // Default on; set AUTO_CLICK_CONTINUE=false to leave the CTA for humans.
+    if (!AUTO_CLICK_CONTINUE) return false;
     const button = page
       .locator(
         '[role="button"]:has-text("Continue"), button:has-text("Continue"), div[role="button"]:has-text("Continue")',

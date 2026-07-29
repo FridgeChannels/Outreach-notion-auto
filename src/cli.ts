@@ -41,6 +41,7 @@ Usage:
   npm run worker:outreach        Single poll for Outreach Session queue
   npm run worker:mailbox         Single poll for Mailbox Scan queue
   npm run worker:login           Interactive web login → auth/<account>.json
+  npm run worker:open            Open headed Notion with saved auth (manual use)
   npm run worker:export-auth     Export cookies from old NOTION_PROFILE_DIR
   npm run worker:diagnose        Inspect due sessions / mailboxes
 

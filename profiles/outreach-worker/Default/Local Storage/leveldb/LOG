@@ -1,3 +1,3 @@
-2026/07/23-23:53:19.439 12e Reusing MANIFEST /app/profiles/outreach-worker/Default/Local Storage/leveldb/MANIFEST-000001
-2026/07/23-23:53:19.450 12e Recovering log #219
-2026/07/23-23:53:19.451 12e Reusing old log /app/profiles/outreach-worker/Default/Local Storage/leveldb/000219.log 
+2026/07/29-14:40:15.586 e5d7799 Reusing MANIFEST /Users/markbai/Documents/Outreach-notion-auto/profiles/outreach-worker/Default/Local Storage/leveldb/MANIFEST-000001
+2026/07/29-14:40:15.604 e5d7799 Recovering log #219
+2026/07/29-14:40:15.605 e5d7799 Reusing old log /Users/markbai/Documents/Outreach-notion-auto/profiles/outreach-worker/Default/Local Storage/leveldb/000219.log 

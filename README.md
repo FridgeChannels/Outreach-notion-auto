@@ -34,6 +34,9 @@ cp .env.example .env
 PLAYWRIGHT_HEADLESS=false npm run worker:login -- --account=mark
 # → 生成 auth/mark.json（通常几十 KB）
 
+# 用已有 cookies 打开浏览器，人工操作 Notion；终端按 Enter / Ctrl+C 关闭
+PLAYWRIGHT_HEADLESS=false npm run worker:open -- --account=mark
+
 # 若已有旧 profile，可免重新登录导出：
 NOTION_PROFILE_DIR=/path/to/profiles/outreach-worker \
   npm run worker:export-auth -- --account=mark
@@ -144,7 +147,7 @@ src/
   notion/          Session + Mailbox repositories
   pages/           Notion AI / Login / Workspace
   flows/           processOutreach / processMailbox / poll / validators
-scripts/           login / diagnose / start|stop|status-workers
+scripts/           login / open / diagnose / start|stop|status-workers
 tests/unit/
 auth/              <account>.json（勿提交）
 data/              共享 session/execution locks
