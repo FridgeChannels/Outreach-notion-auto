@@ -223,6 +223,16 @@ export async function releaseLock(
  * Acquire an execution-key lock before creating chat / submitting.
  * If another worker already submitted this key, returns null.
  */
+/** True when this touch was already handed to the AI (duplicate-send guard). */
+export async function isExecutionSubmitted(executionKey: string): Promise<boolean> {
+  const existing = (await readLock(
+    executionLockPath(executionKey),
+  )) as unknown as ExecutionLockRecord | null;
+  if (!existing?.submittedAt) return false;
+  if (isExpired(existing as unknown as LockRecord)) return false;
+  return true;
+}
+
 export async function acquireExecutionLock(
   executionKey: string,
 ): Promise<string | null> {

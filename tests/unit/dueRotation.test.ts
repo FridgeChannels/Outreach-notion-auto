@@ -93,3 +93,14 @@ describe("isSchedulerEligible as the post-lock re-check", () => {
     );
   });
 });
+
+describe("due-window sizing for poisoned queue head", () => {
+  it("fetches a wider due page than the execute limit", async () => {
+    // Document the contract used by pollAndProcessOutreach: skip/park rows at
+    // the head must not prevent later due Sessions from being considered.
+    const executeLimit = 10;
+    const fetchLimit = Math.max(executeLimit * 5, 50);
+    assert.equal(fetchLimit, 50);
+    assert.ok(fetchLimit > executeLimit);
+  });
+});

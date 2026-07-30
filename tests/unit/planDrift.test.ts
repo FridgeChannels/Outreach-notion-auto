@@ -180,7 +180,11 @@ describe("Next Wake At ownership", () => {
       new URL("../../src/notion/sessionRepository.ts", import.meta.url),
       "utf-8",
     );
-    const allowed = new Set(["applyControlJsonWriteback", "healSessionScheduleFromPlan"]);
+    const allowed = new Set([
+      "applyControlJsonWriteback",
+      "healSessionScheduleFromPlan",
+      "parkSessionOutOfDueQueue",
+    ]);
     const offenders: string[] = [];
     let currentFn = "<module>";
 

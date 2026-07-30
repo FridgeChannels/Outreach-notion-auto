@@ -5,8 +5,12 @@ import {
   clearExpiredRetryCooldowns,
   clearRetryCooldown,
   getRetryCooldown,
+  isExecutionSubmitted,
   isRetryCoolingDown,
   setRetryCooldown,
+  acquireExecutionLock,
+  markExecutionSubmitted,
+  releaseExecutionLock,
 } from "../../src/locks.js";
 
 describe("retry cooldown", () => {
@@ -57,5 +61,22 @@ describe("buildExecutionKey", () => {
 
   it("falls back to a stable placeholder when the touch is unknown", () => {
     assert.equal(buildExecutionKey("s1", null, "Plan"), "s1:none:Plan");
+  });
+});
+
+describe("isExecutionSubmitted", () => {
+  it("is true only after markExecutionSubmitted", async () => {
+    const key = buildExecutionKey(`submitted-${Date.now()}`, "touch-1", "Plan");
+    assert.equal(await isExecutionSubmitted(key), false);
+    const token = await acquireExecutionLock(key);
+    assert.ok(token);
+    assert.equal(await isExecutionSubmitted(key), false);
+    await markExecutionSubmitted(key, token!, "https://www.notion.so/chat/x");
+    assert.equal(await isExecutionSubmitted(key), true);
+    // Must still block a second acquire — this is what caused Claimed↔Pending loops
+    // when poll kept reclaiming an already-finished touch.
+    assert.equal(await acquireExecutionLock(key), null);
+    await releaseExecutionLock(key, token!, { onlyIfNotSubmitted: true });
+    assert.equal(await isExecutionSubmitted(key), true);
   });
 });

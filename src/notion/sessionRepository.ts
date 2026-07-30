@@ -717,6 +717,72 @@ export function plannedTouchAt(session: SessionRecord): string | null {
   return parseOutreachStateJson(session.outreachStateJson)?.nextTouchAt ?? null;
 }
 
+/** Stable key for this run's touch: wake event, else planned touch, else Next Wake At. */
+export function executionTouchKey(session: SessionRecord): string {
+  return (
+    session.wakePayloadEventId ||
+    plannedTouchAt(session) ||
+    session.nextWakeAt ||
+    "none"
+  );
+}
+
+/**
+ * Pull a Session out of the due queue without inventing a new business cadence.
+ * Prefers Last Control JSON / plan next_touch_at when still in the future; otherwise
+ * parks for a day so poisoned rows stop monopolizing fetchDueSessions(limit).
+ */
+export async function parkSessionOutOfDueQueue(
+  session: SessionRecord,
+  reason: string,
+  now = new Date(),
+): Promise<SessionRecord> {
+  const control = parseSessionControlJson(session.lastControlJson);
+  const controlWakeMs = control?.nextWakeAt
+    ? new Date(control.nextWakeAt).getTime()
+    : NaN;
+  const planned = plannedTouchAt(session);
+  const plannedMs = planned ? new Date(planned).getTime() : NaN;
+
+  let wakeAt: Date;
+  if (!Number.isNaN(controlWakeMs) && controlWakeMs > now.getTime()) {
+    wakeAt = new Date(controlWakeMs);
+  } else if (!Number.isNaN(plannedMs) && plannedMs > now.getTime()) {
+    wakeAt = new Date(plannedMs);
+  } else {
+    wakeAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  }
+
+  const ids = await propIds();
+  const statusPart = await statusUpdatePayload(
+    await dsId(),
+    ids.status,
+    SESSION_STATUS.SLEEPING,
+  );
+  await getNotionClient().pages.update({
+    page_id: session.pageId,
+    properties: {
+      ...statusPart,
+      [ids.nextWakeAt]: { date: { start: wakeAt.toISOString() } },
+      [ids.lastError]: {
+        rich_text: [{ type: "text", text: { content: reason.slice(0, 2000) } }],
+      },
+    },
+  });
+  await clearRetryCooldown(session.pageId);
+  await setRetryCooldown(
+    session.pageId,
+    new Date(Math.min(wakeAt.getTime(), now.getTime() + 60 * 60 * 1000)),
+    reason,
+  );
+  logger.warn("Parked Session out of due queue", {
+    pageId: session.pageId,
+    wakeAt: wakeAt.toISOString(),
+    reason: reason.slice(0, 200),
+  });
+  return loadSession(session.pageUrl);
+}
+
 export function sessionSnapshot(session: SessionRecord): Record<string, unknown> {
   return {
     session_id: session.sessionId,

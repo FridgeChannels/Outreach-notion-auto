@@ -32,7 +32,8 @@ import {
   reconcileSessionFromControlJson,
   waitForRunningVisibility,
   guardPlanDrift,
-  plannedTouchAt,
+  parkSessionOutOfDueQueue,
+  executionTouchKey,
 } from "../notion/sessionRepository.js";
 import { describePlanDrift } from "../notion/outreachState.js";
 import { parsePageUrl } from "../notion/helpers.js";
@@ -47,6 +48,7 @@ import {
   releaseExecutionLock,
   clearExecutionLock,
   clearRetryCooldown,
+  isExecutionSubmitted,
 } from "../locks.js";
 import { NotionAiChatPage } from "../pages/notionAiChatPage.js";
 import {
@@ -131,7 +133,7 @@ export async function processOutreachJob(
   // so the planned outbound time is what makes "this touch was already sent" true.
   const executionKey = buildExecutionKey(
     session.sessionId,
-    session.wakePayloadEventId || plannedTouchAt(session) || session.nextWakeAt,
+    executionTouchKey(session),
     session.nextAction,
   );
   let executionToken: string | null = null;
@@ -187,6 +189,13 @@ export async function processOutreachJob(
 
     executionToken = await acquireExecutionLock(executionKey);
     if (!executionToken) {
+      if (await isExecutionSubmitted(executionKey)) {
+        await parkSessionOutOfDueQueue(
+          session,
+          `Duplicate execution blocked (already submitted): ${executionKey}`,
+        );
+        throw new SkipError(`Duplicate execution already submitted: ${executionKey}`);
+      }
       throw new SkipError(`Duplicate execution blocked: ${executionKey}`);
     }
 
@@ -361,17 +370,14 @@ export async function processOutreachJob(
 
     if (error instanceof SkipError) {
       runLog.status_after = statusBefore;
-      // Batch pre-claims leave Status=Claimed; if the lock expired while waiting
-      // in queue, put back to Pending so the next poll can pick it up. Rows the
-      // Prompt already moved on are left alone — they are no longer Claimed.
-      if (/lock/i.test(error.message)) {
-        try {
-          if (await releaseClaimToPendingIfStillClaimed(session.pageId)) {
-            runLog.status_after = SESSION_STATUS.PENDING;
-          }
-        } catch (releaseErr) {
-          logger.warn("Failed to release claim after lock skip", releaseErr);
+      // Any skip after claim must not leave Status=Claimed: reclaim would bounce
+      // it to Pending and the same row would Claim↔Pending forever at queue head.
+      try {
+        if (await releaseClaimToPendingIfStillClaimed(session.pageId)) {
+          runLog.status_after = SESSION_STATUS.PENDING;
         }
+      } catch (releaseErr) {
+        logger.warn("Failed to release claim after skip", releaseErr);
       }
       logger.run(runLog);
       logger.info(`Skipped: ${error.message}`);

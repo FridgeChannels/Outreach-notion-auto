@@ -1,15 +1,19 @@
 import {
   acquireLock,
+  buildExecutionKey,
   clearExpiredRetryCooldowns,
+  isExecutionSubmitted,
   isRetryCoolingDown,
   releaseLock,
 } from "../locks.js";
 import {
   claimSession,
   countSessionsByStatus,
+  executionTouchKey,
   fetchDueSessions,
   guardPlanDrift,
   loadSession,
+  parkSessionOutOfDueQueue,
   reclaimStuckSessions,
   type DueSessionRow,
 } from "../notion/sessionRepository.js";
@@ -58,7 +62,9 @@ export async function pollAndProcessOutreach(
     });
   }
 
-  const due = await fetchDueSessions(limit);
+  // Fetch a wider due window than we will execute: poisoned / cooling / already-
+  // submitted rows at the front of the queue must not hide later genuine work.
+  const due = await fetchDueSessions(Math.max(limit * 5, 50));
   if (!due.length) {
     const byStatus = await countSessionsByStatus().catch(() => ({}));
     logger.info("No due outreach sessions", {
@@ -69,7 +75,7 @@ export async function pollAndProcessOutreach(
     return;
   }
 
-  logger.info(`Found ${due.length} due outreach session(s)`);
+  logger.info(`Found ${due.length} due outreach session(s) (execute up to ${limit})`);
 
   // One browser + one AI chat for the whole batch (rotate after 15–25 rounds)
   const context = await openBrowserContext();
@@ -78,9 +84,12 @@ export async function pollAndProcessOutreach(
   let okCount = 0;
   let failCount = 0;
   let skipCount = 0;
+  let executed = 0;
 
   try {
     for (const row of rotateForWorker(due)) {
+      if (executed >= limit) break;
+
       if (await isRetryCoolingDown(row.pageId)) {
         logger.info(`Skip session (technical retry cooldown): ${row.pageId}`);
         skipCount++;
@@ -131,6 +140,26 @@ export async function pollAndProcessOutreach(
         continue;
       }
 
+      // Already-submitted touch: never Claim — that left Claimed↔Pending loops and
+      // pinned the same few rows at the front of every worker's due page.
+      const execKey = buildExecutionKey(
+        fresh.sessionId,
+        executionTouchKey(fresh),
+        fresh.nextAction,
+      );
+      if (await isExecutionSubmitted(execKey)) {
+        await parkSessionOutOfDueQueue(
+          fresh,
+          `Execution already submitted for ${execKey}; parked so other due Sessions can run`,
+        );
+        await releaseLock("session", row.pageId, token);
+        logger.warn(`Skip session (already submitted, parked): ${row.pageId}`, {
+          executionKey: execKey,
+        });
+        skipCount++;
+        continue;
+      }
+
       try {
         await claimSession(row.pageId);
       } catch (e) {
@@ -141,6 +170,7 @@ export async function pollAndProcessOutreach(
       }
 
       logger.info(`Claimed session ${row.pageId}`, { nextWakeAt: row.nextWakeAt });
+      executed++;
       const job: OutreachJob = {
         sessionPageUrl: row.pageUrl,
         lockToken: token,
@@ -178,6 +208,7 @@ export async function pollAndProcessOutreach(
     batch_ok: okCount,
     batch_fail: failCount,
     batch_skip: skipCount,
+    batch_attempted: executed,
   });
 }
 
