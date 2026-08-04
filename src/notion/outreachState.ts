@@ -1,4 +1,5 @@
 import { NEXT_ACTION, PLAN_DRIFT_TOLERANCE_MS, type NextAction } from "../config.js";
+import { isReplyMode, parseSessionControlJson } from "./controlJson.js";
 
 export interface ParsedOutreachState {
   nextTouchAt: string | null;
@@ -74,6 +75,8 @@ export interface PlanDriftInput {
   nextAction: string | null;
   nextWakeAt: string | null;
   outreachStateJson: string | null;
+  /** When set, Reply Mode skips the scheduled-touch drift gate. */
+  lastControlJson?: string | null;
 }
 
 /**
@@ -83,6 +86,8 @@ export interface PlanDriftInput {
  * "due" forever and an Execute run would send the next touch far too early.
  *
  * Returns null when the row is consistent, not an outbound action, or has no plan.
+ * Reply Mode also returns null: inbound replies use Session.Next Wake At and must
+ * not be blocked by a stale Pre-Exhibition model_state.next_touch_at.
  */
 export function detectPlanDrift(
   session: PlanDriftInput,
@@ -90,6 +95,7 @@ export function detectPlanDrift(
   toleranceMs = PLAN_DRIFT_TOLERANCE_MS,
 ): PlanDrift | null {
   if (!isOutboundAction(session.nextAction)) return null;
+  if (isReplyMode(parseSessionControlJson(session.lastControlJson))) return null;
   const state = parseOutreachStateJson(session.outreachStateJson);
   if (!state?.nextTouchAt) return null;
 

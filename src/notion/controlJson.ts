@@ -5,6 +5,11 @@ export interface ParsedControlJson {
   sessionStatus: SessionStatus | null;
   nextAction: NextAction | null;
   nextWakeAt: string | null;
+  /** Reply Mode fields — written by Handle Reply / Controller. */
+  communicationModel: string | null;
+  replyToInteractionId: string | null;
+  replyExecutionKey: string | null;
+  scheduledTouchSuppressed: boolean;
 }
 
 const SESSION_STATUS_VALUES = new Set<string>(Object.values(SESSION_STATUS));
@@ -57,12 +62,37 @@ export function parseSessionControlJson(raw: string | null | undefined): ParsedC
   const nextAction =
     actionRaw && NEXT_ACTION_VALUES.has(actionRaw) ? (actionRaw as NextAction) : null;
 
+  const scheduledSuppressed =
+    obj.scheduled_touch_suppressed === true ||
+    obj.scheduledTouchSuppressed === true;
+
   return {
     outcome: asString(obj.outcome),
     sessionStatus,
     nextAction,
     nextWakeAt: wakeRaw,
+    communicationModel:
+      asString(obj.communication_model) || asString(obj.communicationModel),
+    replyToInteractionId:
+      asString(obj.reply_to_interaction_id) ||
+      asString(obj.replyToInteractionId),
+    replyExecutionKey:
+      asString(obj.reply_execution_key) || asString(obj.replyExecutionKey),
+    scheduledTouchSuppressed: scheduledSuppressed,
   };
+}
+
+/**
+ * True when Last Control JSON says this Session is in Reply Mode.
+ * Scheduled Outreach State JSON (Pre-Exhibition next_touch_at, etc.) must not
+ * drive dedupe keys or plan-drift gates while Reply is active.
+ */
+export function isReplyMode(control: ParsedControlJson | null | undefined): boolean {
+  if (!control) return false;
+  if (control.communicationModel === "Reply") return true;
+  if (control.scheduledTouchSuppressed) return true;
+  if (control.replyToInteractionId || control.replyExecutionKey) return true;
+  return false;
 }
 
 /** Control JSON is complete enough to reconcile a stuck Running/Claimed Session. */

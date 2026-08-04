@@ -1,6 +1,5 @@
 import {
   acquireLock,
-  buildExecutionKey,
   clearExpiredRetryCooldowns,
   isExecutionSubmitted,
   isRetryCoolingDown,
@@ -9,7 +8,7 @@ import {
 import {
   claimSession,
   countSessionsByStatus,
-  executionTouchKey,
+  outreachExecutionKey,
   fetchDueSessions,
   guardPlanDrift,
   loadSession,
@@ -142,11 +141,7 @@ export async function pollAndProcessOutreach(
 
       // Already-submitted touch: never Claim — that left Claimed↔Pending loops and
       // pinned the same few rows at the front of every worker's due page.
-      const execKey = buildExecutionKey(
-        fresh.sessionId,
-        executionTouchKey(fresh),
-        fresh.nextAction,
-      );
+      const execKey = outreachExecutionKey(fresh);
       if (await isExecutionSubmitted(execKey)) {
         await parkSessionOutOfDueQueue(
           fresh,

@@ -33,7 +33,7 @@ import {
   waitForRunningVisibility,
   guardPlanDrift,
   parkSessionOutOfDueQueue,
-  executionTouchKey,
+  outreachExecutionKey,
 } from "../notion/sessionRepository.js";
 import { describePlanDrift } from "../notion/outreachState.js";
 import { parsePageUrl } from "../notion/helpers.js";
@@ -42,7 +42,6 @@ import {
   releaseLock,
   acquireLock,
   startLockHeartbeat,
-  buildExecutionKey,
   acquireExecutionLock,
   markExecutionSubmitted,
   releaseExecutionLock,
@@ -129,13 +128,9 @@ export async function processOutreachJob(
   const runId = makeRunId(session.sessionId);
   const artifactCtx: ArtifactContext = { recordId: session.sessionId, runId };
 
-  // Identify the touch, not just the Session: scheduled wakes carry no event id,
-  // so the planned outbound time is what makes "this touch was already sent" true.
-  const executionKey = buildExecutionKey(
-    session.sessionId,
-    executionTouchKey(session),
-    session.nextAction,
-  );
+  // Identify the touch, not just the Session. Reply Mode uses reply_to_interaction_id;
+  // Scheduled Outreach uses planned outbound time (see outreachExecutionKey).
+  const executionKey = outreachExecutionKey(session);
   let executionToken: string | null = null;
   let clientLockToken: string | null = null;
   let clientPageId: string | null = session.clientPageId;

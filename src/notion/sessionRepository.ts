@@ -32,6 +32,7 @@ import {
 } from "./helpers.js";
 import {
   isReconcileableControlJson,
+  isReplyMode,
   isStaleClaimOrRunning,
   parseSessionControlJson,
   type ParsedControlJson,
@@ -40,6 +41,7 @@ import {
   clearRetryCooldown,
   isLockHeld,
   setRetryCooldown,
+  buildExecutionKey,
 } from "../locks.js";
 import {
   describePlanDrift,
@@ -199,6 +201,9 @@ export async function loadSession(sessionPageUrl: string): Promise<SessionRecord
         (typeof obj.meeting_event_key === "string" && obj.meeting_event_key) ||
         (typeof obj.event_id === "string" && obj.event_id) ||
         (typeof obj.eventId === "string" && obj.eventId) ||
+        // Inbound Reply payloads use message_id (not meeting event ids).
+        (typeof obj.message_id === "string" && obj.message_id) ||
+        (typeof obj.messageId === "string" && obj.messageId) ||
         null;
       wakePayloadEventId = key;
     } catch {
@@ -717,7 +722,10 @@ export function plannedTouchAt(session: SessionRecord): string | null {
   return parseOutreachStateJson(session.outreachStateJson)?.nextTouchAt ?? null;
 }
 
-/** Stable key for this run's touch: wake event, else planned touch, else Next Wake At. */
+/**
+ * Touch identity used inside buildExecutionKey for Scheduled Outreach.
+ * Reply Mode must NOT use this — see outreachExecutionKey().
+ */
 export function executionTouchKey(session: SessionRecord): string {
   return (
     session.wakePayloadEventId ||
@@ -728,9 +736,42 @@ export function executionTouchKey(session: SessionRecord): string {
 }
 
 /**
+ * Full dedupe key for an outreach run.
+ *
+ * Reply Mode keys off reply_to_interaction_id (or Controller reply_execution_key),
+ * never Outreach State JSON model_state.next_touch_at — that belongs to the
+ * scheduled cold sequence and caused Reply runs to be parked as duplicates of
+ * an already-submitted Pre-Exhibition Execute Email.
+ */
+export function outreachExecutionKey(session: SessionRecord): string {
+  const control = parseSessionControlJson(session.lastControlJson);
+  if (isReplyMode(control)) {
+    if (control?.replyExecutionKey?.trim()) {
+      return control.replyExecutionKey.trim();
+    }
+    const interactionId =
+      control?.replyToInteractionId?.trim() ||
+      session.wakePayloadEventId ||
+      null;
+    if (interactionId) {
+      return `reply:${session.sessionId}:${interactionId}:${session.nextAction || "Execute Email"}`;
+    }
+  }
+  return buildExecutionKey(
+    session.sessionId,
+    executionTouchKey(session),
+    session.nextAction,
+  );
+}
+
+/** Short park for Reply already-submitted / transient blocks (not +24h). */
+const REPLY_PARK_MS = 15 * 60 * 1000;
+
+/**
  * Pull a Session out of the due queue without inventing a new business cadence.
  * Prefers Last Control JSON / plan next_touch_at when still in the future; otherwise
- * parks for a day so poisoned rows stop monopolizing fetchDueSessions(limit).
+ * parks briefly (Reply) or for a day (scheduled) so poisoned rows stop monopolizing
+ * fetchDueSessions(limit).
  */
 export async function parkSessionOutOfDueQueue(
   session: SessionRecord,
@@ -738,6 +779,7 @@ export async function parkSessionOutOfDueQueue(
   now = new Date(),
 ): Promise<SessionRecord> {
   const control = parseSessionControlJson(session.lastControlJson);
+  const reply = isReplyMode(control);
   const controlWakeMs = control?.nextWakeAt
     ? new Date(control.nextWakeAt).getTime()
     : NaN;
@@ -747,10 +789,12 @@ export async function parkSessionOutOfDueQueue(
   let wakeAt: Date;
   if (!Number.isNaN(controlWakeMs) && controlWakeMs > now.getTime()) {
     wakeAt = new Date(controlWakeMs);
-  } else if (!Number.isNaN(plannedMs) && plannedMs > now.getTime()) {
+  } else if (!reply && !Number.isNaN(plannedMs) && plannedMs > now.getTime()) {
+    // Scheduled Outreach only — never push Reply wakes to a cold-sequence touch.
     wakeAt = new Date(plannedMs);
   } else {
-    wakeAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    // Reply: short backoff. Scheduled poison rows: +1d so they leave the due page.
+    wakeAt = new Date(now.getTime() + (reply ? REPLY_PARK_MS : 24 * 60 * 60 * 1000));
   }
 
   const ids = await propIds();
@@ -772,12 +816,13 @@ export async function parkSessionOutOfDueQueue(
   await clearRetryCooldown(session.pageId);
   await setRetryCooldown(
     session.pageId,
-    new Date(Math.min(wakeAt.getTime(), now.getTime() + 60 * 60 * 1000)),
+    new Date(Math.min(wakeAt.getTime(), now.getTime() + (reply ? REPLY_PARK_MS : 60 * 60 * 1000))),
     reason,
   );
   logger.warn("Parked Session out of due queue", {
     pageId: session.pageId,
     wakeAt: wakeAt.toISOString(),
+    replyMode: reply,
     reason: reason.slice(0, 200),
   });
   return loadSession(session.pageUrl);
