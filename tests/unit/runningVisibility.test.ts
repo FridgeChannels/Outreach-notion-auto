@@ -33,6 +33,7 @@ function base(overrides: Partial<SessionRecord> = {}): SessionRecord {
     retryCount: 0,
     clientDnc: false,
     hasLatestInteraction: false,
+    lastActionId: null,
     ...overrides,
   };
 }

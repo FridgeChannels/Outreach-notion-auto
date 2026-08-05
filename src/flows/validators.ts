@@ -5,10 +5,15 @@ import {
   TECHNICAL_SESSION_ERROR_RE,
   type SessionStatus,
 } from "../config.js";
-import { SkipError, type ExecutionPhase } from "../errors.js";
+import { InvalidCompletionError, SkipError, type ExecutionPhase } from "../errors.js";
 import type { SessionRecord } from "../notion/sessionRepository.js";
 import type { MailboxRecord } from "../notion/mailboxRepository.js";
 import { MAILBOX_STATUS } from "../config.js";
+import {
+  EXECUTE_EMAIL_TERMINAL_ACTIONS,
+  isExecuteEmailSentAction,
+  parseSessionControlJson,
+} from "../notion/controlJson.js";
 
 export function validateSessionBeforeBrowser(session: SessionRecord): void {
   if (!session.sessionId?.trim()) throw new SkipError("Session ID is empty");
@@ -40,6 +45,40 @@ export function validateMailboxBeforeBrowser(mailbox: MailboxRecord): void {
     mailbox.status === MAILBOX_STATUS.DISABLED
   ) {
     throw new SkipError(`Mailbox is ${mailbox.status}`);
+  }
+}
+
+/**
+ * Execute Email Stage 9 contract (mirrors Controller Prompt).
+ * Called only when the claimed Next Action was Execute Email.
+ * Sent/simulated require Latest Interaction + Last Action ID; otherwise
+ * InvalidCompletionError so we technical-retry and do NOT mark submitted.
+ */
+export function validateExecuteEmailCompletion(session: SessionRecord): void {
+  const control = parseSessionControlJson(session.lastControlJson);
+  const performed = control?.actionPerformed?.trim() || null;
+  if (!performed || !EXECUTE_EMAIL_TERMINAL_ACTIONS.has(performed)) {
+    throw new InvalidCompletionError(
+      `Execute Email writeback missing terminal action_performed (got ${performed ?? "null"}); ` +
+        `refusing to mark touch submitted without EMAIL_SENT/SIMULATED/SKIPPED/FAILED`,
+    );
+  }
+  if (!isExecuteEmailSentAction(performed)) return;
+
+  if (!session.hasLatestInteraction) {
+    throw new InvalidCompletionError(
+      `Execute Email ${performed} but Latest Interaction is empty; Prompt Stage 9 incomplete`,
+    );
+  }
+  if (!session.lastActionId?.trim()) {
+    throw new InvalidCompletionError(
+      `Execute Email ${performed} but Last Action ID is empty; Prompt Stage 9 incomplete`,
+    );
+  }
+  if (control?.actionId && session.lastActionId.trim() !== control.actionId.trim()) {
+    throw new InvalidCompletionError(
+      `Execute Email Last Action ID (${session.lastActionId}) != Control.action_id (${control.actionId})`,
+    );
   }
 }
 

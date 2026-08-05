@@ -109,6 +109,7 @@ export const PROP = {
   NEXT_ACTION: "Next Action",
   LATEST_MEETING: "Latest Meeting",
   LATEST_INTERACTION: "Latest Interaction",
+  LAST_ACTION_ID: "Last Action ID",
   WAKE_PAYLOAD_JSON: "Wake Payload JSON",
   WAKE_REASON: "Wake Reason",
   DNC: "Email Do Not Contact",

@@ -5,6 +5,10 @@ export interface ParsedControlJson {
   sessionStatus: SessionStatus | null;
   nextAction: NextAction | null;
   nextWakeAt: string | null;
+  /** Execute Email Stage 9: EMAIL_SENT | EMAIL_SIMULATED | EMAIL_SKIPPED | … */
+  actionPerformed: string | null;
+  /** Execute Email action_id (live:/dryrun:…). */
+  actionId: string | null;
   /** Reply Mode fields — written by Handle Reply / Controller. */
   communicationModel: string | null;
   replyToInteractionId: string | null;
@@ -71,6 +75,9 @@ export function parseSessionControlJson(raw: string | null | undefined): ParsedC
     sessionStatus,
     nextAction,
     nextWakeAt: wakeRaw,
+    actionPerformed:
+      asString(obj.action_performed) || asString(obj.actionPerformed),
+    actionId: asString(obj.action_id) || asString(obj.actionId),
     communicationModel:
       asString(obj.communication_model) || asString(obj.communicationModel),
     replyToInteractionId:
@@ -80,6 +87,20 @@ export function parseSessionControlJson(raw: string | null | undefined): ParsedC
       asString(obj.reply_execution_key) || asString(obj.replyExecutionKey),
     scheduledTouchSuppressed: scheduledSuppressed,
   };
+}
+
+export const EXECUTE_EMAIL_SENT_ACTIONS = new Set(["EMAIL_SENT", "EMAIL_SIMULATED"]);
+export const EXECUTE_EMAIL_TERMINAL_ACTIONS = new Set([
+  "EMAIL_SENT",
+  "EMAIL_SIMULATED",
+  "EMAIL_SKIPPED",
+  "EMAIL_FAILED",
+  "ALREADY_COMPLETED",
+]);
+
+/** True when Control JSON reports a real send (Live or Dry Run simulated). */
+export function isExecuteEmailSentAction(actionPerformed: string | null | undefined): boolean {
+  return Boolean(actionPerformed && EXECUTE_EMAIL_SENT_ACTIONS.has(actionPerformed));
 }
 
 /**

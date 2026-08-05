@@ -71,6 +71,7 @@ export interface SessionRecord {
   retryCount: number;
   clientDnc: boolean;
   hasLatestInteraction: boolean;
+  lastActionId: string | null;
 }
 
 interface PropIds {
@@ -88,6 +89,7 @@ interface PropIds {
   nextAction: string;
   latestMeeting: string | null;
   latestInteraction: string | null;
+  lastActionId: string | null;
   wakePayloadJson: string | null;
   wakeReason: string | null;
 }
@@ -139,6 +141,7 @@ async function propIds(): Promise<PropIds> {
     nextAction: req(PROP.NEXT_ACTION),
     latestMeeting: findPropertyId(props, PROP.LATEST_MEETING),
     latestInteraction: findPropertyId(props, PROP.LATEST_INTERACTION),
+    lastActionId: findPropertyId(props, PROP.LAST_ACTION_ID),
     wakePayloadJson: findPropertyId(props, PROP.WAKE_PAYLOAD_JSON),
     wakeReason: findPropertyId(props, PROP.WAKE_REASON),
   };
@@ -234,6 +237,7 @@ export async function loadSession(sessionPageUrl: string): Promise<SessionRecord
     hasLatestInteraction: ids.latestInteraction
       ? getRelationPageIds(props, ids.latestInteraction).length > 0
       : false,
+    lastActionId: ids.lastActionId ? getRichText(props, ids.lastActionId) || null : null,
   };
 }
 
@@ -843,6 +847,7 @@ export function sessionSnapshot(session: SessionRecord): Record<string, unknown>
     wake_payload_event_id: session.wakePayloadEventId,
     retry_count: session.retryCount,
     has_latest_interaction: session.hasLatestInteraction,
+    last_action_id: session.lastActionId,
   };
 }
 

@@ -15,6 +15,7 @@ import { detectExecutionPhase, errorCategoryFromPhase, SkipError, InvalidComplet
 import {
   decideErrorAction,
   isRealConversationUrl,
+  validateExecuteEmailCompletion,
   validateSessionBeforeBrowser,
 } from "./validators.js";
 import { type OutreachBatchChat } from "./chatReuse.js";
@@ -315,14 +316,9 @@ export async function processOutreachJob(
       });
     }
 
-    if (
-      updated.nextAction === NEXT_ACTION.EXECUTE_EMAIL &&
-      !updated.hasLatestInteraction
-    ) {
-      logger.warn(
-        "Execute Email without Latest Interaction — Prompt may have skipped Interaction create",
-        { sessionId: session.sessionId, pageId: session.pageId },
-      );
+    // Claimed action was Execute Email: enforce Prompt Stage 9 before submitted mark.
+    if (session.nextAction === NEXT_ACTION.EXECUTE_EMAIL) {
+      validateExecuteEmailCompletion(updated);
     }
 
     await markExecutionSubmitted(executionKey, executionToken, conversationUrl);

@@ -25,6 +25,7 @@ function base(overrides: Partial<SessionRecord> = {}): SessionRecord {
     retryCount: 0,
     clientDnc: false,
     hasLatestInteraction: true,
+    lastActionId: null,
     ...overrides,
   };
 }
