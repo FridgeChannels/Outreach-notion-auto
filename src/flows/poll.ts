@@ -12,7 +12,7 @@ import {
   fetchDueSessions,
   guardPlanDrift,
   loadSession,
-  parkSessionOutOfDueQueue,
+  markSubmittedExecutionForReview,
   reclaimStuckSessions,
   type DueSessionRow,
 } from "../notion/sessionRepository.js";
@@ -143,12 +143,9 @@ export async function pollAndProcessOutreach(
       // pinned the same few rows at the front of every worker's due page.
       const execKey = outreachExecutionKey(fresh);
       if (await isExecutionSubmitted(execKey)) {
-        await parkSessionOutOfDueQueue(
-          fresh,
-          `Execution already submitted for ${execKey}; parked so other due Sessions can run`,
-        );
+        await markSubmittedExecutionForReview(fresh, execKey);
         await releaseLock("session", row.pageId, token);
-        logger.warn(`Skip session (already submitted, parked): ${row.pageId}`, {
+        logger.error(`Skip session (submitted execution needs review): ${row.pageId}`, {
           executionKey: execKey,
         });
         skipCount++;

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { validateSuccessfulSessionUpdate, type SessionRecord } from "../../src/notion/sessionRepository.js";
 import { SESSION_STATUS } from "../../src/config.js";
 import { InvalidCompletionError } from "../../src/errors.js";
+import { validatePlanCompletion } from "../../src/flows/validators.js";
 
 function base(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -92,5 +93,18 @@ describe("validateSuccessfulSessionUpdate", () => {
         ),
       InvalidCompletionError,
     );
+  });
+});
+
+describe("validatePlanCompletion", () => {
+  it("rejects a Plan that did not advance Next Action", () => {
+    assert.throws(
+      () => validatePlanCompletion(base({ nextAction: "Plan" })),
+      InvalidCompletionError,
+    );
+  });
+
+  it("accepts Plan completion that advances to Execute Email", () => {
+    assert.doesNotThrow(() => validatePlanCompletion(base({ nextAction: "Execute Email" })));
   });
 });

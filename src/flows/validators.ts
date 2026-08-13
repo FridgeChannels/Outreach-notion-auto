@@ -82,6 +82,18 @@ export function validateExecuteEmailCompletion(session: SessionRecord): void {
   }
 }
 
+/**
+ * A completed Plan must advance the state machine. Retaining Next Action=Plan
+ * would let a submitted Plan mark suppress every future attempt for this touch.
+ */
+export function validatePlanCompletion(session: SessionRecord): void {
+  if (session.nextAction === "Plan") {
+    throw new InvalidCompletionError(
+      "Plan writeback retained Next Action=Plan; refusing to mark Plan submitted",
+    );
+  }
+}
+
 export function isSchedulerEligible(
   status: string | null,
   nextAction: string | null,

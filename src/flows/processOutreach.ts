@@ -16,6 +16,7 @@ import {
   decideErrorAction,
   isRealConversationUrl,
   validateExecuteEmailCompletion,
+  validatePlanCompletion,
   validateSessionBeforeBrowser,
 } from "./validators.js";
 import { type OutreachBatchChat } from "./chatReuse.js";
@@ -33,7 +34,7 @@ import {
   reconcileSessionFromControlJson,
   waitForRunningVisibility,
   guardPlanDrift,
-  parkSessionOutOfDueQueue,
+  markSubmittedExecutionForReview,
   outreachExecutionKey,
 } from "../notion/sessionRepository.js";
 import { describePlanDrift } from "../notion/outreachState.js";
@@ -186,11 +187,8 @@ export async function processOutreachJob(
     executionToken = await acquireExecutionLock(executionKey);
     if (!executionToken) {
       if (await isExecutionSubmitted(executionKey)) {
-        await parkSessionOutOfDueQueue(
-          session,
-          `Duplicate execution blocked (already submitted): ${executionKey}`,
-        );
-        throw new SkipError(`Duplicate execution already submitted: ${executionKey}`);
+        await markSubmittedExecutionForReview(session, executionKey);
+        throw new SkipError(`Submitted execution requires human review: ${executionKey}`);
       }
       throw new SkipError(`Duplicate execution blocked: ${executionKey}`);
     }
@@ -319,6 +317,9 @@ export async function processOutreachJob(
     // Claimed action was Execute Email: enforce Prompt Stage 9 before submitted mark.
     if (session.nextAction === NEXT_ACTION.EXECUTE_EMAIL) {
       validateExecuteEmailCompletion(updated);
+    }
+    if (session.nextAction === NEXT_ACTION.PLAN) {
+      validatePlanCompletion(updated);
     }
 
     await markExecutionSubmitted(executionKey, executionToken, conversationUrl);

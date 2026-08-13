@@ -768,66 +768,46 @@ export function outreachExecutionKey(session: SessionRecord): string {
   );
 }
 
-/** Short park for Reply already-submitted / transient blocks (not +24h). */
-const REPLY_PARK_MS = 15 * 60 * 1000;
-
 /**
- * Pull a Session out of the due queue without inventing a new business cadence.
- * Prefers Last Control JSON / plan next_touch_at when still in the future; otherwise
- * parks briefly (Reply) or for a day (scheduled) so poisoned rows stop monopolizing
- * fetchDueSessions(limit).
+ * A submitted execution mark without a matching completed Session is ambiguous:
+ * the external action may have happened, so automated retry risks a duplicate send.
+ *
+ * Do not "park" this row by rewriting Next Wake At. That disguises a broken
+ * completion contract as normal scheduling and permanently drifts the plan.
  */
-export async function parkSessionOutOfDueQueue(
+export async function markSubmittedExecutionForReview(
   session: SessionRecord,
-  reason: string,
-  now = new Date(),
+  executionKey: string,
 ): Promise<SessionRecord> {
-  const control = parseSessionControlJson(session.lastControlJson);
-  const reply = isReplyMode(control);
-  const controlWakeMs = control?.nextWakeAt
-    ? new Date(control.nextWakeAt).getTime()
-    : NaN;
-  const planned = plannedTouchAt(session);
-  const plannedMs = planned ? new Date(planned).getTime() : NaN;
-
-  let wakeAt: Date;
-  if (!Number.isNaN(controlWakeMs) && controlWakeMs > now.getTime()) {
-    wakeAt = new Date(controlWakeMs);
-  } else if (!reply && !Number.isNaN(plannedMs) && plannedMs > now.getTime()) {
-    // Scheduled Outreach only — never push Reply wakes to a cold-sequence touch.
-    wakeAt = new Date(plannedMs);
-  } else {
-    // Reply: short backoff. Scheduled poison rows: +1d so they leave the due page.
-    wakeAt = new Date(now.getTime() + (reply ? REPLY_PARK_MS : 24 * 60 * 60 * 1000));
-  }
-
   const ids = await propIds();
+  const dataSourceId = await dsId();
   const statusPart = await statusUpdatePayload(
-    await dsId(),
+    dataSourceId,
     ids.status,
-    SESSION_STATUS.SLEEPING,
+    SESSION_STATUS.ERROR,
   );
+  const nextActionPart = await namedOptionUpdatePayload(
+    dataSourceId,
+    ids.nextAction,
+    NEXT_ACTION.HUMAN_REVIEW,
+  );
+  const reason =
+    `Execution was previously submitted but its completion could not be verified; ` +
+    `manual review required before any retry. executionKey=${executionKey}`;
   await getNotionClient().pages.update({
     page_id: session.pageId,
     properties: {
       ...statusPart,
-      [ids.nextWakeAt]: { date: { start: wakeAt.toISOString() } },
+      ...nextActionPart,
       [ids.lastError]: {
         rich_text: [{ type: "text", text: { content: reason.slice(0, 2000) } }],
       },
     },
   });
   await clearRetryCooldown(session.pageId);
-  await setRetryCooldown(
-    session.pageId,
-    new Date(Math.min(wakeAt.getTime(), now.getTime() + (reply ? REPLY_PARK_MS : 60 * 60 * 1000))),
-    reason,
-  );
-  logger.warn("Parked Session out of due queue", {
+  logger.error("Submitted execution requires human review", {
     pageId: session.pageId,
-    wakeAt: wakeAt.toISOString(),
-    replyMode: reply,
-    reason: reason.slice(0, 200),
+    executionKey,
   });
   return loadSession(session.pageUrl);
 }
