@@ -9,6 +9,8 @@ import {
   markExecutionSubmitted,
   releaseExecutionLock,
   buildExecutionKey,
+  clearExecutionLock,
+  isExecutionSubmitted,
 } from "../../src/locks.js";
 
 describe("locks", () => {
@@ -59,5 +61,16 @@ describe("locks", () => {
     await releaseExecutionLock(key, t1!, { onlyIfNotSubmitted: true });
     const t3 = await acquireExecutionLock(key);
     assert.equal(t3, null);
+  });
+
+  it("clears a submitted mark when Human Review releases it", async () => {
+    const key = buildExecutionKey(`review-${Date.now()}`, "touch-1", "Plan");
+    const token = await acquireExecutionLock(key);
+    assert.ok(token);
+    await markExecutionSubmitted(key, token!, null);
+    assert.equal(await isExecutionSubmitted(key), true);
+
+    await clearExecutionLock(key);
+    assert.equal(await isExecutionSubmitted(key), false);
   });
 });

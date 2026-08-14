@@ -809,7 +809,16 @@ export async function markSubmittedExecutionForReview(
     pageId: session.pageId,
     executionKey,
   });
-  return loadSession(session.pageUrl);
+  const updated = await loadSession(session.pageUrl);
+  if (
+    updated.status !== SESSION_STATUS.ERROR ||
+    updated.nextAction !== NEXT_ACTION.HUMAN_REVIEW
+  ) {
+    throw new Error(
+      `Refusing to clear submitted execution mark: expected Error/Human Review, got ${updated.status}/${updated.nextAction}`,
+    );
+  }
+  return updated;
 }
 
 export function sessionSnapshot(session: SessionRecord): Record<string, unknown> {

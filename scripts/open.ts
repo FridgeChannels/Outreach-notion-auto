@@ -31,7 +31,29 @@ async function main(): Promise<void> {
   const context = await openBrowserContext({ authPath, headless: false });
   try {
     const page = await context.newPage();
-    await page.goto("https://www.notion.so", { waitUntil: "domcontentloaded", timeout: 90_000 });
+    const target = "https://www.notion.so";
+    const maxAttempts = 3;
+    let opened = false;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await page.goto(target, { waitUntil: "domcontentloaded", timeout: 90_000 });
+        opened = true;
+        break;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(
+          `Navigate failed (${attempt}/${maxAttempts}): ${msg.split("\n")[0]}`,
+        );
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 1500 * attempt));
+        }
+      }
+    }
+    if (!opened) {
+      console.warn(
+        "Could not open Notion automatically (often proxy/TUN). Browser stays open — refresh or paste the URL manually.",
+      );
+    }
 
     await new Promise<void>((resolve) => {
       const done = (): void => {

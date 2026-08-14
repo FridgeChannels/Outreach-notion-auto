@@ -188,6 +188,9 @@ export async function processOutreachJob(
     if (!executionToken) {
       if (await isExecutionSubmitted(executionKey)) {
         await markSubmittedExecutionForReview(session, executionKey);
+        // The Session is verified Error/Human Review before releasing the
+        // idempotency mark; retries are subsequently an explicit Notion action.
+        await clearExecutionLock(executionKey);
         throw new SkipError(`Submitted execution requires human review: ${executionKey}`);
       }
       throw new SkipError(`Duplicate execution blocked: ${executionKey}`);

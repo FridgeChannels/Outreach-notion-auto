@@ -1,5 +1,6 @@
 import {
   acquireLock,
+  clearExecutionLock,
   clearExpiredRetryCooldowns,
   isExecutionSubmitted,
   isRetryCoolingDown,
@@ -144,6 +145,10 @@ export async function pollAndProcessOutreach(
       const execKey = outreachExecutionKey(fresh);
       if (await isExecutionSubmitted(execKey)) {
         await markSubmittedExecutionForReview(fresh, execKey);
+        // Human Review removes this Session from the scheduler before the
+        // submitted mark is released, so a human can explicitly authorize a
+        // retry in Notion without needing server-side lock cleanup.
+        await clearExecutionLock(execKey);
         await releaseLock("session", row.pageId, token);
         logger.error(`Skip session (submitted execution needs review): ${row.pageId}`, {
           executionKey: execKey,
